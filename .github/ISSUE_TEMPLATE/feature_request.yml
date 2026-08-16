@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest a focused improvement
+title: "Feature: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should change?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation ideas
+      description: How could this be tested manually or automatically?
+    validations:
+      required: false

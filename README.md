@@ -317,3 +317,11 @@ node --test
 The GitHub Actions workflow runs both checks on pushes and pull requests. Omarchy Marketplace verification is separate: the marketplace must scan and record the exact listed commit before it can display `Verified`.
 
 No npm dependencies are required.
+
+## Contributing and support
+
+- See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+- Use [GitHub Issues](https://github.com/HackXIt/omarchy-chromecast/issues) for reproducible bugs and focused feature requests.
+- Use [GitHub Discussions](https://github.com/HackXIt/omarchy-chromecast/discussions) for questions and troubleshooting.
+- Please follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+- Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
