@@ -12,6 +12,11 @@ function tempHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'chromium-castctl-test-'));
 }
 
+function writeExecutable(file, content) {
+  fs.writeFileSync(file, content);
+  fs.chmodSync(file, 0o755);
+}
+
 function jsonResponse(value) {
   return {
     ok: true,
@@ -161,6 +166,47 @@ test('chromium audio loopback is opt-in', () => {
   const paths = mod.resolvePaths({ HOME: tempHome() });
   const args = mod.chromiumLaunchArgs(paths, 9333, { CHROMIUM_CASTCTL_CAST_AUDIO: '1' });
   assert.ok(args.includes('--enable-features=MediaRouter,PulseaudioLoopbackForCast'));
+});
+
+test('browser launch honors the browser startup timeout separately from the CDP timeout', async () => {
+  const home = tempHome();
+  const fakeBin = path.join(home, 'bin');
+  fs.mkdirSync(fakeBin, { recursive: true });
+  writeExecutable(path.join(fakeBin, 'chromium'), '#!/bin/sh\n/bin/sleep 1\n');
+
+  const paths = mod.resolvePaths({ HOME: home });
+  let listCalls = 0;
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/json/list')) {
+      listCalls += 1;
+      if (listCalls === 1) throw new Error('CDP not ready yet');
+      return jsonResponse([{ type: 'page', id: 'page-1', webSocketDebuggerUrl: 'ws://page' }]);
+    }
+    if (url.includes('/json/new?')) return jsonResponse({});
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+  let stdout = '';
+  let stderr = '';
+
+  const code = await mod.run(
+    ['sinks'],
+    {
+      stdout: { write: (chunk) => { stdout += chunk; } },
+      stderr: { write: (chunk) => { stderr += chunk; } },
+    },
+    {
+      HOME: home,
+      PATH: fakeBin,
+      CHROMIUM_CASTCTL_CDP_TIMEOUT_MS: '1',
+      CHROMIUM_CASTCTL_BROWSER_TIMEOUT_MS: '800',
+      CHROMIUM_CASTCTL_SINK_WAIT_MS: '1',
+    },
+    { paths, fetchImpl, WebSocketImpl: FakeWebSocket },
+  );
+
+  assert.equal(code, 0, stderr);
+  assert.match(stdout, /Wohnzimmer/);
+  assert.ok(listCalls >= 2);
 });
 
 test('status --waybar renders idle JSON without launching Chromium', async () => {
