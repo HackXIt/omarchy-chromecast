@@ -463,6 +463,18 @@ async function waitForPidExit(pid, timeoutMs) {
   return !isPidAlive(pid);
 }
 
+async function discardStateBrowser(paths, state) {
+  if (state && Number.isInteger(state.pid) && state.pid !== process.pid) {
+    terminateStateBrowser(state, paths);
+    await waitForPidExit(state.pid, 1500);
+    if (isPidAlive(state.pid)) {
+      signalBrowserProcess(state, paths, 'SIGKILL');
+      await waitForPidExit(state.pid, 500);
+    }
+  }
+  clearState(paths);
+}
+
 async function shutdownBrowser(paths, browser, client) {
   const state = browser || readState(paths);
   if (!state) return false;
@@ -525,22 +537,24 @@ async function getReusableBrowser(paths, options = {}) {
   const env = options.env || process.env;
   const state = readState(paths);
   if (state && !stateMatchesLaunchConfig(state, paths, env)) {
-    terminateStateBrowser(state, paths);
-    clearState(paths);
+    await discardStateBrowser(paths, state);
     return null;
   }
   if (await stateHasUsableCdp(state, options)) return state;
 
   if (state && isPidAlive(state.pid) && Number.isInteger(state.port)) {
     try {
-      await waitForCdp(state.port, options);
+      await waitForCdp(state.port, {
+        ...options,
+        browserStartTimeoutMs: options.timeoutMs || cdpTimeoutMs(env),
+      });
       return state;
     } catch {
       // Fall through and clear stale/failed state below.
     }
   }
 
-  if (state) clearState(paths);
+  if (state) await discardStateBrowser(paths, state);
   return null;
 }
 
@@ -588,6 +602,7 @@ async function launchChromium(paths, options = {}) {
     await waitForCdp(port, options);
     await minimizeChromiumWindow(port, options);
   } catch (error) {
+    await discardStateBrowser(paths, state);
     throw new CliError(
       `Chromium launched but DevTools did not become available. See log: ${paths.logFile}\n${error.message}`,
       1,
@@ -896,9 +911,9 @@ async function getStatus(paths, options = {}) {
       browser: true,
       stale: false,
     };
-  }).catch((error) => {
+  }).catch(async (error) => {
     const state = readState(paths);
-    if (state) clearState(paths);
+    if (state) await discardStateBrowser(paths, state);
     return { activeSink: null, sinks: [], browser: false, stale: true, error };
   });
 }
@@ -1016,10 +1031,15 @@ function spawnPrewarmBrowser(options = {}) {
   return child;
 }
 
-function runWalker(sinks, options = {}) {
-  const env = options.env || process.env;
+function requireWalker(env = process.env) {
   const walker = findExecutable('walker', env);
   if (!walker) throw new CliError('walker is not installed or not on PATH; run chromium-castctl start <sink-name> instead.', 1);
+  return walker;
+}
+
+function runWalker(sinks, options = {}) {
+  const env = options.env || process.env;
+  const walker = requireWalker(env);
 
   const input = `${sinks.map((sink) => sink.name).join('\n')}\n`;
   const result = childProcess.spawnSync(walker, ['--dmenu', '--placeholder', 'Cast to…'], {
@@ -1037,19 +1057,39 @@ function runWalker(sinks, options = {}) {
 async function commandPick(paths, options, io) {
   let token = null;
   return withUiState(paths, 'Discovering Chromecast targets…', options, async () => {
+    const env = options.env || process.env;
     const current = freshUiState(paths);
     token = current && current.pid === process.pid ? current.token : null;
 
     const avahiSinks = discoverAvahiSinks(options);
     if (avahiSinks.length > 0) {
-      const prewarm = spawnPrewarmBrowser(options);
-      if (token) updateUiStateLabel(paths, token, 'Choose a Chromecast target in Walker…', options.env || process.env);
-      const selected = runWalker(avahiSinks, options);
+      let selected = avahiSinks.length === 1 ? avahiSinks[0].name : null;
+      let prewarm = null;
       if (!selected) {
+        requireWalker(env);
+        prewarm = spawnPrewarmBrowser(options);
+        if (token) updateUiStateLabel(paths, token, 'Choose a Chromecast target in Walker…', env);
         try {
-          process.kill(prewarm.pid, 'SIGTERM');
-        } catch {
-          // Best-effort: the helper may already have exited after launching Chromium.
+          selected = runWalker(avahiSinks, options);
+        } catch (error) {
+          try {
+            process.kill(prewarm.pid, 'SIGTERM');
+          } catch {
+            // Best-effort: the helper may already have exited after launching Chromium.
+          }
+          await sleep(500);
+          await shutdownBrowser(paths, readState(paths), null);
+          throw error;
+        }
+      }
+
+      if (!selected) {
+        if (prewarm) {
+          try {
+            process.kill(prewarm.pid, 'SIGTERM');
+          } catch {
+            // Best-effort: the helper may already have exited after launching Chromium.
+          }
         }
         await sleep(500);
         await shutdownBrowser(paths, readState(paths), null);
@@ -1057,7 +1097,7 @@ async function commandPick(paths, options, io) {
         return 0;
       }
 
-      if (token) updateUiStateLabel(paths, token, `Starting cast to ${selected}…`, options.env || process.env);
+      if (token) updateUiStateLabel(paths, token, `Starting cast to ${selected}…`, env);
       return withCastClient(paths, {
         ...options,
         waitMs: options.waitMs ?? sinkWaitMs(options.env),
@@ -1086,8 +1126,16 @@ async function commandPick(paths, options, io) {
         throw new CliError('No Cast sinks found. Check that Chromium can see the Chromecast and both devices are on the same network.', 1);
       }
 
-      if (token) updateUiStateLabel(paths, token, 'Choose a Chromecast target in Walker…', options.env || process.env);
-      const selected = runWalker(namedSinks, options);
+      let selected = namedSinks.length === 1 ? namedSinks[0].name : null;
+      if (!selected) {
+        if (token) updateUiStateLabel(paths, token, 'Choose a Chromecast target in Walker…', env);
+        try {
+          selected = runWalker(namedSinks, options);
+        } catch (error) {
+          await shutdownBrowser(paths, browser, client);
+          throw error;
+        }
+      }
       if (!selected) {
         await shutdownBrowser(paths, browser, client);
         writeLine(io, 'No sink selected; closed Chromium control browser.');

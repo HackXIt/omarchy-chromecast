@@ -17,6 +17,21 @@ function writeExecutable(file, content) {
   fs.chmodSync(file, 0o755);
 }
 
+function waitForChildExit(child, timeoutMs = 2500) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.off('exit', onExit);
+      resolve(false);
+    }, timeoutMs);
+    function onExit() {
+      clearTimeout(timer);
+      resolve(true);
+    }
+    child.once('exit', onExit);
+  });
+}
+
 function jsonResponse(value) {
   return {
     ok: true,
@@ -227,6 +242,99 @@ test('status --waybar renders idle JSON without launching Chromium', async () =>
     class: 'idle',
     tooltip: 'Chromecast: idle',
   });
+});
+
+test('status cleanup terminates stale same-profile browser state', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const child = childProcess.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+
+  try {
+    mod.writeState(paths, {
+      pid: child.pid,
+      port: 9222,
+      remoteDebuggingAddress: '127.0.0.1',
+      userDataDir: paths.profileDir,
+      launchMode: 'headless',
+      profileVersion: 4,
+      castAudio: false,
+    });
+    const fetchImpl = async () => { throw new Error('CDP is unavailable'); };
+
+    const status = await mod.getStatus(paths, { fetchImpl, timeoutMs: 1, waitMs: 1 });
+
+    assert.equal(status.browser, false);
+    assert.equal(await waitForChildExit(child), true);
+    assert.equal(mod.readState(paths), null);
+  } finally {
+    if (mod.isPidAlive(child.pid)) {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        process.kill(child.pid, 'SIGKILL');
+      }
+    }
+  }
+});
+
+test('failed browser launch clears the written state file', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  let stderr = '';
+  const code = await mod.run(
+    ['sinks'],
+    {
+      stdout: { write: () => {} },
+      stderr: { write: (chunk) => { stderr += chunk; } },
+    },
+    {
+      HOME: paths.home,
+      PATH: '',
+      CHROMIUM_CASTCTL_CHROMIUM: process.execPath,
+      CHROMIUM_CASTCTL_BROWSER_TIMEOUT_MS: '1',
+      CHROMIUM_CASTCTL_CDP_TIMEOUT_MS: '1',
+    },
+    { paths, fetchImpl: async () => { throw new Error('CDP never became ready'); } },
+  );
+
+  assert.equal(code, 1);
+  assert.match(stderr, /DevTools did not become available/);
+  assert.equal(mod.readState(paths), null);
+});
+
+test('pick starts the only Avahi sink directly without Walker', async () => {
+  const home = tempHome();
+  const fakeBin = path.join(home, 'bin');
+  fs.mkdirSync(fakeBin, { recursive: true });
+  writeExecutable(path.join(fakeBin, 'avahi-browse'), '#!/bin/sh\nprintf \'%s\\n\' \'=;wlan0;IPv4;Chromecast;_googlecast._tcp;local;host;10.0.0.2;8009;"id=1" "fn=Wohnzimmer"\'\n');
+  writeExecutable(path.join(fakeBin, 'chromium'), '#!/bin/sh\n/bin/sleep 1\n');
+
+  const paths = mod.resolvePaths({ HOME: home });
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/json/list')) return jsonResponse([{ type: 'page', id: 'page-1', webSocketDebuggerUrl: 'ws://page' }]);
+    if (url.includes('/json/new?')) return jsonResponse({});
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+  let stdout = '';
+  let stderr = '';
+
+  const code = await mod.run(
+    ['pick'],
+    {
+      stdout: { write: (chunk) => { stdout += chunk; } },
+      stderr: { write: (chunk) => { stderr += chunk; } },
+    },
+    {
+      HOME: home,
+      PATH: fakeBin,
+      CHROMIUM_CASTCTL_SINK_WAIT_MS: '1',
+    },
+    { paths, fetchImpl, WebSocketImpl: FakeWebSocket },
+  );
+
+  assert.equal(code, 0, stderr);
+  assert.match(stdout, /Started desktop mirroring to Wohnzimmer/);
 });
 
 test('status --waybar renders active sink JSON', () => {
