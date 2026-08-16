@@ -1,0 +1,11 @@
+{
+  "custom/chromecast": {
+    "exec": "chromium-castctl status --waybar",
+    "return-type": "json",
+    "interval": 5,
+    "signal": 12,
+    "on-click": "chromium-castctl waybar-toggle",
+    "on-click-right": "chromium-castctl stop",
+    "tooltip": true
+  }
+}

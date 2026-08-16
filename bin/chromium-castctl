@@ -1,0 +1,1372 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const net = require('node:net');
+const childProcess = require('node:child_process');
+
+const ICON = '';
+const LOCAL_DEVTOOLS_ADDRESS = '127.0.0.1';
+const DEFAULT_SINK_WAIT_MS = 10000;
+const STATUS_SINK_WAIT_MS = 1800;
+const DEFAULT_CDP_TIMEOUT_MS = 5000;
+const DEFAULT_BROWSER_START_TIMEOUT_MS = 12000;
+const PROFILE_VERSION = 4;
+
+class CliError extends Error {
+  constructor(message, exitCode = 1) {
+    super(message);
+    this.name = 'CliError';
+    this.exitCode = exitCode;
+  }
+}
+
+function resolvePaths(env = process.env) {
+  const home = env.HOME || os.homedir();
+  const dataHome = env.XDG_DATA_HOME || path.join(home, '.local', 'share');
+  const stateHome = env.XDG_STATE_HOME || path.join(home, '.local', 'state');
+  const cacheHome = env.XDG_CACHE_HOME || path.join(home, '.cache');
+
+  const dataDir = path.join(dataHome, 'chromium-castctl');
+  const stateDir = path.join(stateHome, 'chromium-castctl');
+  const cacheDir = path.join(cacheHome, 'chromium-castctl');
+
+  return {
+    home,
+    dataDir,
+    stateDir,
+    cacheDir,
+    profileDir: path.join(dataDir, 'chromium-profile'),
+    stateFile: path.join(stateDir, 'state.json'),
+    uiStateFile: path.join(stateDir, 'ui-state.json'),
+    logFile: path.join(cacheDir, 'chromium.log'),
+    profileVersionFile: path.join(dataDir, 'profile-version'),
+    hyprPortalConfig: path.join(home, '.config', 'hypr', 'xdph.conf'),
+  };
+}
+
+function ensureDir(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+function readState(paths) {
+  try {
+    const raw = fs.readFileSync(paths.stateFile, 'utf8');
+    const state = JSON.parse(raw);
+    return state && typeof state === 'object' ? state : null;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    if (error instanceof SyntaxError) return null;
+    throw error;
+  }
+}
+
+function writeState(paths, state) {
+  ensureDir(path.dirname(paths.stateFile));
+  const tmp = `${paths.stateFile}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  fs.renameSync(tmp, paths.stateFile);
+}
+
+function clearState(paths) {
+  try {
+    fs.rmSync(paths.stateFile, { force: true });
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+function updateState(paths, updater) {
+  const current = readState(paths) || {};
+  const next = typeof updater === 'function' ? updater(current) : { ...current, ...updater };
+  writeState(paths, next);
+  return next;
+}
+
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+function readUiState(paths) {
+  try {
+    const raw = fs.readFileSync(paths.uiStateFile, 'utf8');
+    const state = JSON.parse(raw);
+    return state && typeof state === 'object' ? state : null;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    if (error instanceof SyntaxError) return null;
+    throw error;
+  }
+}
+
+function writeUiState(paths, state) {
+  ensureDir(path.dirname(paths.uiStateFile));
+  const tmp = `${paths.uiStateFile}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  fs.renameSync(tmp, paths.uiStateFile);
+}
+
+function clearUiState(paths, token = null) {
+  const current = readUiState(paths);
+  if (token && current && current.token !== token) return;
+  try {
+    fs.rmSync(paths.uiStateFile, { force: true });
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+function freshUiState(paths) {
+  const state = readUiState(paths);
+  if (!state) return null;
+
+  const startedAt = Date.parse(state.startedAt || '');
+  const ageMs = Number.isFinite(startedAt) ? Date.now() - startedAt : Number.POSITIVE_INFINITY;
+  const pidAlive = !state.pid || isPidAlive(state.pid);
+  if (ageMs > 120000 || !pidAlive) {
+    clearUiState(paths, state.token || null);
+    return null;
+  }
+  return state;
+}
+
+function signalWaybar(env = process.env) {
+  const pkill = findExecutable('pkill', env);
+  if (!pkill) return;
+  childProcess.spawnSync(pkill, ['-RTMIN+12', 'waybar'], { env, timeout: 1000 });
+}
+
+function beginUiState(paths, label, env = process.env) {
+  const existing = freshUiState(paths);
+  if (existing && existing.pid !== process.pid) return null;
+
+  const token = `${process.pid}-${Date.now()}`;
+  writeUiState(paths, {
+    status: 'busy',
+    label,
+    pid: process.pid,
+    token,
+    startedAt: new Date().toISOString(),
+  });
+  signalWaybar(env);
+  return token;
+}
+
+function updateUiStateLabel(paths, token, label, env = process.env) {
+  const current = freshUiState(paths);
+  if (!current || current.token !== token) return;
+  writeUiState(paths, { ...current, label });
+  signalWaybar(env);
+}
+
+function finishUiState(paths, token, env = process.env) {
+  clearUiState(paths, token);
+  signalWaybar(env);
+}
+
+async function withUiState(paths, label, options, callback) {
+  const env = options.env || process.env;
+  const existingToken = env.CHROMIUM_CASTCTL_UI_TOKEN || null;
+  if (existingToken) {
+    const current = freshUiState(paths);
+    if (current && current.token === existingToken) {
+      try {
+        return await callback(existingToken);
+      } finally {
+        finishUiState(paths, existingToken, env);
+      }
+    }
+  }
+
+  const token = beginUiState(paths, label, env);
+  if (!token) throw new CliError('Chromecast action already in progress.', 1);
+  try {
+    return await callback(token);
+  } finally {
+    finishUiState(paths, token, env);
+  }
+}
+
+function isExecutable(file) {
+  try {
+    fs.accessSync(file, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function findExecutable(command, env = process.env) {
+  if (!command) return null;
+  if (command.includes('/')) {
+    const full = path.resolve(command);
+    return isExecutable(full) ? full : null;
+  }
+
+  const pathValue = env.PATH || process.env.PATH || '';
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, command);
+    if (isExecutable(candidate)) return candidate;
+  }
+  return null;
+}
+
+function chromiumCommand(env = process.env) {
+  return env.CHROMIUM_CASTCTL_CHROMIUM || 'chromium';
+}
+
+function sinkWaitMs(env = process.env, fallback = DEFAULT_SINK_WAIT_MS) {
+  const value = Number.parseInt(env.CHROMIUM_CASTCTL_SINK_WAIT_MS || '', 10);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function browserStartTimeoutMs(env = process.env) {
+  const value = Number.parseInt(env.CHROMIUM_CASTCTL_BROWSER_TIMEOUT_MS || '', 10);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_BROWSER_START_TIMEOUT_MS;
+}
+
+function cdpTimeoutMs(env = process.env) {
+  const value = Number.parseInt(env.CHROMIUM_CASTCTL_CDP_TIMEOUT_MS || '', 10);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_CDP_TIMEOUT_MS;
+}
+
+function avahiTimeoutMs(env = process.env) {
+  const value = Number.parseInt(env.CHROMIUM_CASTCTL_AVAHI_TIMEOUT_MS || '', 10);
+  return Number.isFinite(value) && value > 0 ? value : 1500;
+}
+
+function parseAvahiBrowseOutput(output) {
+  const sinks = [];
+  const seen = new Set();
+  const text = String(output || '');
+
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.includes('_googlecast._tcp')) continue;
+
+    const quoted = line.matchAll(/"((?:\\.|[^"])*)"/g);
+    for (const match of quoted) {
+      const token = match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      if (!token.startsWith('fn=')) continue;
+      const name = token.slice(3).trim();
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      sinks.push({ name, source: 'avahi' });
+    }
+  }
+
+  return sinks;
+}
+
+function discoverAvahiSinks(options = {}) {
+  const env = options.env || process.env;
+  const avahi = findExecutable('avahi-browse', env);
+  if (!avahi) return [];
+
+  const result = childProcess.spawnSync(avahi, ['-rpt', '_googlecast._tcp'], {
+    encoding: 'utf8',
+    env,
+    timeout: avahiTimeoutMs(env),
+  });
+
+  return parseAvahiBrowseOutput(result.stdout || '');
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function fetchJson(url, options = {}) {
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  if (typeof fetchImpl !== 'function') {
+    throw new CliError('Node fetch API is unavailable; use a current Node runtime.', 1);
+  }
+
+  const timeoutMs = options.timeoutMs || cdpTimeoutMs(options.env || process.env);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(url, {
+      method: options.method || 'GET',
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} from ${url}`);
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchTargets(port, options = {}) {
+  return fetchJson(`http://${LOCAL_DEVTOOLS_ADDRESS}:${port}/json/list`, options);
+}
+
+function selectPageTarget(targets) {
+  if (!Array.isArray(targets)) return null;
+  return targets.find((target) => target && target.type === 'page' && target.webSocketDebuggerUrl) || null;
+}
+
+async function createPageTarget(port, options = {}) {
+  const url = `http://${LOCAL_DEVTOOLS_ADDRESS}:${port}/json/new?${encodeURIComponent('about:blank')}`;
+  try {
+    return await fetchJson(url, { ...options, method: 'PUT' });
+  } catch {
+    return fetchJson(url, { ...options, method: 'GET' });
+  }
+}
+
+async function getPageTarget(port, options = {}) {
+  let targets = await fetchTargets(port, options);
+  let target = selectPageTarget(targets);
+  if (target) return target;
+
+  await createPageTarget(port, options);
+  targets = await fetchTargets(port, options);
+  target = selectPageTarget(targets);
+  if (!target) {
+    throw new CliError('Chromium CDP has no page target. Try stopping chromium-castctl and retrying.', 1);
+  }
+  return target;
+}
+
+function parseAddressPort(address) {
+  return address && typeof address === 'object' ? address.port : null;
+}
+
+function allocateLocalPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.on('error', reject);
+    server.listen(0, LOCAL_DEVTOOLS_ADDRESS, () => {
+      const port = parseAddressPort(server.address());
+      server.close((error) => {
+        if (error) reject(error);
+        else resolve(port);
+      });
+    });
+  });
+}
+
+function castAudioEnabled(env = process.env) {
+  const value = String(env.CHROMIUM_CASTCTL_CAST_AUDIO || '').toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes';
+}
+
+function chromiumFeatures(env = process.env) {
+  const features = ['MediaRouter'];
+  if (castAudioEnabled(env)) features.push('PulseaudioLoopbackForCast');
+  return features.join(',');
+}
+
+function chromiumLaunchArgs(paths, port, env = process.env) {
+  return [
+    `--user-data-dir=${paths.profileDir}`,
+    `--remote-debugging-address=${LOCAL_DEVTOOLS_ADDRESS}`,
+    `--remote-debugging-port=${port}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-default-apps',
+    `--enable-features=${chromiumFeatures(env)}`,
+    '--load-media-router-component-extension',
+    '--headless=new',
+    'about:blank',
+  ];
+}
+
+async function waitForCdp(port, options = {}) {
+  const timeoutMs = options.timeoutMs || browserStartTimeoutMs(options.env || process.env);
+  const started = Date.now();
+  let lastError;
+
+  while (Date.now() - started < timeoutMs) {
+    try {
+      await fetchTargets(port, { ...options, timeoutMs: 1000 });
+      return true;
+    } catch (error) {
+      lastError = error;
+      await sleep(250);
+    }
+  }
+
+  throw lastError || new Error('Timed out waiting for Chromium DevTools');
+}
+
+async function stateHasUsableCdp(state, options = {}) {
+  if (!state || !Number.isInteger(state.pid) || !Number.isInteger(state.port)) return false;
+  if (state.remoteDebuggingAddress && state.remoteDebuggingAddress !== LOCAL_DEVTOOLS_ADDRESS) return false;
+  if (!isPidAlive(state.pid)) return false;
+
+  try {
+    await fetchTargets(state.port, { ...options, timeoutMs: 1000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function stateMatchesLaunchConfig(state, paths, env = process.env) {
+  if (!state) return false;
+  return state.launchMode === 'headless'
+    && state.profileVersion === PROFILE_VERSION
+    && Boolean(state.castAudio) === castAudioEnabled(env)
+    && state.userDataDir === paths.profileDir;
+}
+
+function signalBrowserProcess(state, paths, signal) {
+  if (!state || !Number.isInteger(state.pid) || state.userDataDir !== paths.profileDir) return;
+  if (state.pid === process.pid) return;
+
+  try {
+    process.kill(-state.pid, signal);
+    return;
+  } catch {
+    // Fall back to signaling just the browser PID below.
+  }
+
+  try {
+    process.kill(state.pid, signal);
+  } catch {
+    // Best-effort cleanup only; stale state is still removed below.
+  }
+}
+
+function terminateStateBrowser(state, paths) {
+  signalBrowserProcess(state, paths, 'SIGTERM');
+}
+
+async function waitForPidExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isPidAlive(pid)) return true;
+    await sleep(100);
+  }
+  return !isPidAlive(pid);
+}
+
+async function shutdownBrowser(paths, browser, client) {
+  const state = browser || readState(paths);
+  if (!state) return false;
+  if (state.pid === process.pid) {
+    clearState(paths);
+    return true;
+  }
+
+  if (client) {
+    client.send('Browser.close', {}, 1000).catch(() => null);
+    await waitForPidExit(state.pid, 3000);
+  }
+
+  if (isPidAlive(state.pid)) {
+    terminateStateBrowser(state, paths);
+    await waitForPidExit(state.pid, 1500);
+  }
+
+  if (isPidAlive(state.pid)) {
+    signalBrowserProcess(state, paths, 'SIGKILL');
+    await waitForPidExit(state.pid, 500);
+  }
+
+  clearState(paths);
+  return true;
+}
+
+function resetIsolatedProfile(paths) {
+  const oldProfileDir = `${paths.profileDir}.old-${Date.now()}-${process.pid}`;
+  try {
+    fs.renameSync(paths.profileDir, oldProfileDir);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return;
+  }
+
+  try {
+    fs.rmSync(oldProfileDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
+  } catch {
+    // The old isolated profile can be removed manually later; launching uses a fresh path.
+  }
+}
+
+function writeProfileVersion(paths) {
+  ensureDir(paths.dataDir);
+  fs.writeFileSync(paths.profileVersionFile, `${PROFILE_VERSION}\n`, 'utf8');
+}
+
+function prepareFreshProfile(paths) {
+  resetIsolatedProfile(paths);
+  writeProfileVersion(paths);
+}
+
+async function getReusableBrowser(paths, options = {}) {
+  const env = options.env || process.env;
+  const state = readState(paths);
+  if (state && !stateMatchesLaunchConfig(state, paths, env)) {
+    terminateStateBrowser(state, paths);
+    clearState(paths);
+    return null;
+  }
+  if (await stateHasUsableCdp(state, options)) return state;
+
+  if (state && isPidAlive(state.pid) && Number.isInteger(state.port)) {
+    try {
+      await waitForCdp(state.port, options);
+      return state;
+    } catch {
+      // Fall through and clear stale/failed state below.
+    }
+  }
+
+  if (state) clearState(paths);
+  return null;
+}
+
+async function launchChromium(paths, options = {}) {
+  const env = options.env || process.env;
+  const executable = findExecutable(chromiumCommand(env), env);
+  if (!executable) {
+    throw new CliError('Chromium is not installed or not on PATH. Install Chromium and retry.', 1);
+  }
+
+  prepareFreshProfile(paths);
+  ensureDir(paths.profileDir);
+  ensureDir(path.dirname(paths.logFile));
+  const port = await allocateLocalPort();
+  const args = chromiumLaunchArgs(paths, port, env);
+  const logFd = fs.openSync(paths.logFile, 'a');
+  let child;
+  try {
+    child = childProcess.spawn(executable, args, {
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      env,
+    });
+  } finally {
+    fs.closeSync(logFd);
+  }
+
+  child.unref();
+  const state = {
+    pid: child.pid,
+    port,
+    remoteDebuggingAddress: LOCAL_DEVTOOLS_ADDRESS,
+    userDataDir: paths.profileDir,
+    logFile: paths.logFile,
+    launchArgs: args,
+    launchMode: 'headless',
+    profileVersion: PROFILE_VERSION,
+    castAudio: castAudioEnabled(env),
+    startedAt: new Date().toISOString(),
+    lastActiveSink: null,
+  };
+  writeState(paths, state);
+
+  try {
+    await waitForCdp(port, options);
+    await minimizeChromiumWindow(port, options);
+  } catch (error) {
+    throw new CliError(
+      `Chromium launched but DevTools did not become available. See log: ${paths.logFile}\n${error.message}`,
+      1,
+    );
+  }
+
+  return state;
+}
+
+async function ensureChromium(paths, options = {}) {
+  const reusable = await getReusableBrowser(paths, options);
+  if (reusable) return reusable;
+  return launchChromium(paths, options);
+}
+
+function addWsListener(ws, event, handler, options) {
+  if (typeof ws.addEventListener === 'function') {
+    ws.addEventListener(event, handler, options);
+    return () => ws.removeEventListener(event, handler, options);
+  }
+  if (typeof ws.on === 'function') {
+    ws.on(event, handler);
+    return () => ws.off ? ws.off(event, handler) : ws.removeListener(event, handler);
+  }
+  throw new Error('WebSocket implementation does not support events');
+}
+
+async function messageDataToString(data) {
+  if (typeof data === 'string') return data;
+  if (Buffer.isBuffer(data)) return data.toString('utf8');
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8');
+  if (ArrayBuffer.isView(data)) return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('utf8');
+  if (data && typeof data.text === 'function') return data.text();
+  return String(data);
+}
+
+class CdpClient {
+  constructor(ws) {
+    this.ws = ws;
+    this.nextId = 1;
+    this.pending = new Map();
+    this.handlers = new Map();
+    this.closed = false;
+
+    addWsListener(ws, 'message', (event) => {
+      const data = event && typeof event === 'object' && 'data' in event ? event.data : event;
+      this.handleMessage(data).catch(() => {});
+    });
+    addWsListener(ws, 'close', () => this.rejectAll(new Error('CDP WebSocket closed')));
+    addWsListener(ws, 'error', (event) => {
+      const error = event && event.error ? event.error : new Error('CDP WebSocket error');
+      this.rejectAll(error);
+    });
+  }
+
+  static async connect(url, options = {}) {
+    const WebSocketImpl = options.WebSocketImpl || globalThis.WebSocket;
+    if (typeof WebSocketImpl !== 'function') {
+      throw new CliError('Node WebSocket API is unavailable; use a current Node runtime.', 1);
+    }
+
+    const ws = new WebSocketImpl(url);
+    await withTimeout(new Promise((resolve, reject) => {
+      const offOpen = addWsListener(ws, 'open', () => {
+        offOpen();
+        offError();
+        resolve();
+      });
+      const offError = addWsListener(ws, 'error', (event) => {
+        offOpen();
+        offError();
+        reject(event && event.error ? event.error : new Error('Failed to open CDP WebSocket'));
+      });
+    }), options.timeoutMs || cdpTimeoutMs(options.env || process.env), 'Timed out opening CDP WebSocket');
+
+    return new CdpClient(ws);
+  }
+
+  rejectAll(error) {
+    if (this.closed) return;
+    this.closed = true;
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+
+  async handleMessage(data) {
+    const text = await messageDataToString(data);
+    const message = JSON.parse(text);
+
+    if (message.id && this.pending.has(message.id)) {
+      const pending = this.pending.get(message.id);
+      this.pending.delete(message.id);
+      clearTimeout(pending.timer);
+      if (message.error) {
+        const error = new Error(message.error.message || JSON.stringify(message.error));
+        error.cdpError = message.error;
+        pending.reject(error);
+      } else {
+        pending.resolve(message.result);
+      }
+      return;
+    }
+
+    if (message.method) {
+      const handlers = this.handlers.get(message.method) || [];
+      for (const handler of handlers) handler(message.params || {}, message);
+    }
+  }
+
+  send(method, params = {}, timeoutMs = DEFAULT_CDP_TIMEOUT_MS) {
+    if (this.closed || this.ws.readyState !== 1) {
+      return Promise.reject(new Error('CDP WebSocket is not open'));
+    }
+
+    const id = this.nextId++;
+    const payload = JSON.stringify({ id, method, params });
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Timed out waiting for CDP response to ${method}`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
+      try {
+        this.ws.send(payload);
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      }
+    });
+  }
+
+  onEvent(method, handler) {
+    const handlers = this.handlers.get(method) || [];
+    handlers.push(handler);
+    this.handlers.set(method, handlers);
+    return () => {
+      const current = this.handlers.get(method) || [];
+      this.handlers.set(method, current.filter((candidate) => candidate !== handler));
+    };
+  }
+
+  close() {
+    this.closed = true;
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('CDP WebSocket closed'));
+    }
+    this.pending.clear();
+    if (this.ws && this.ws.readyState === 1 && typeof this.ws.close === 'function') {
+      this.ws.close();
+    }
+  }
+}
+
+async function minimizePageWindow(client, target, timeoutMs = DEFAULT_CDP_TIMEOUT_MS) {
+  const params = target && target.id ? { targetId: target.id } : {};
+  const windowInfo = await client.send('Browser.getWindowForTarget', params, timeoutMs);
+  if (!windowInfo || !Number.isInteger(windowInfo.windowId)) return false;
+  await client.send('Browser.setWindowBounds', {
+    windowId: windowInfo.windowId,
+    bounds: { windowState: 'minimized' },
+  }, timeoutMs);
+  return true;
+}
+
+async function minimizeChromiumWindow(port, options = {}) {
+  try {
+    const target = await getPageTarget(port, options);
+    const client = await CdpClient.connect(target.webSocketDebuggerUrl, options);
+    try {
+      return await minimizePageWindow(client, target, options.timeoutMs || cdpTimeoutMs(options.env || process.env));
+    } finally {
+      client.close();
+    }
+  } catch {
+    return false;
+  }
+}
+
+async function enableCastAndCollectSinks(client, options = {}) {
+  let latest = [];
+  let eventCount = 0;
+  let enableError = null;
+  let resolveNextEvent;
+  let nextEvent = new Promise((resolve) => {
+    resolveNextEvent = resolve;
+  });
+
+  const off = client.onEvent('Cast.sinksUpdated', (params) => {
+    latest = Array.isArray(params.sinks) ? params.sinks : [];
+    eventCount += 1;
+    resolveNextEvent(latest);
+    nextEvent = new Promise((resolve) => {
+      resolveNextEvent = resolve;
+    });
+  });
+
+  const waitMs = options.waitMs ?? DEFAULT_SINK_WAIT_MS;
+  const enableTimeoutMs = Math.max(options.timeoutMs || DEFAULT_CDP_TIMEOUT_MS, waitMs + 10000);
+  let enableDone = false;
+  const enablePromise = client.send('Cast.enable', {}, enableTimeoutMs)
+    .then(() => {
+      enableDone = true;
+      return null;
+    })
+    .catch((error) => {
+      enableDone = true;
+      enableError = error;
+      return null;
+    });
+
+  try {
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      if (enableError) throw enableError;
+      if (latest.some((sink) => sink && sink.name)) {
+        await sleep(Math.min(250, Math.max(0, deadline - Date.now())));
+        break;
+      }
+
+      const remaining = Math.max(0, deadline - Date.now());
+      const waits = [nextEvent, sleep(Math.min(250, remaining))];
+      if (!enableDone) waits.push(enablePromise);
+      await Promise.race(waits);
+    }
+
+    if (enableError && eventCount === 0) throw enableError;
+    return latest;
+  } finally {
+    off();
+    enablePromise.catch(() => null);
+  }
+}
+
+async function collectCastSinks(client, options = {}) {
+  const first = await enableCastAndCollectSinks(client, options);
+  if (first.some((sink) => sink && sink.name) || options.retryWhenEmpty === false) return first;
+
+  await sleep(options.emptySinkRetryDelayMs ?? 1000);
+  return enableCastAndCollectSinks(client, {
+    ...options,
+    waitMs: options.retryWaitMs ?? Math.min(options.waitMs ?? DEFAULT_SINK_WAIT_MS, 5000),
+    retryWhenEmpty: false,
+  });
+}
+
+async function withCastClient(paths, options, callback) {
+  const browser = options.launch === false
+    ? await getReusableBrowser(paths, options)
+    : await ensureChromium(paths, options);
+  if (!browser) return callback({ browser: null, client: null, sinks: [] });
+
+  const target = await getPageTarget(browser.port, options);
+  const client = await CdpClient.connect(target.webSocketDebuggerUrl, options);
+  try {
+    const sinks = await collectCastSinks(client, {
+      waitMs: options.waitMs,
+      timeoutMs: options.timeoutMs || cdpTimeoutMs(options.env || process.env),
+      emptySinkRetryDelayMs: options.emptySinkRetryDelayMs,
+    });
+    return await callback({ browser, client, sinks });
+  } finally {
+    client.close();
+  }
+}
+
+function sinkIsActive(sink) {
+  return Boolean(sink && sink.session);
+}
+
+function activeSinks(sinks) {
+  return (sinks || []).filter(sinkIsActive);
+}
+
+function matchSink(sinks, requestedName) {
+  const requested = String(requestedName || '').trim();
+  if (!requested) return null;
+  const exact = sinks.find((sink) => sink.name === requested);
+  if (exact) return exact;
+  const lower = requested.toLowerCase();
+  return sinks.find((sink) => String(sink.name || '').toLowerCase() === lower) || null;
+}
+
+function formatSinkList(sinks) {
+  return sinks.map((sink) => sink.name).filter(Boolean).join('\n');
+}
+
+async function getStatus(paths, options = {}) {
+  const busy = options.ignoreUiState ? null : freshUiState(paths);
+  if (busy) return { busy, activeSink: null, sinks: [], browser: false, stale: false };
+
+  return withCastClient(paths, {
+    ...options,
+    launch: false,
+    waitMs: options.waitMs ?? STATUS_SINK_WAIT_MS,
+  }, async ({ browser, sinks }) => {
+    if (!browser) return { activeSink: null, sinks: [], browser: false, stale: false };
+    const active = activeSinks(sinks);
+    return {
+      activeSink: active[0] ? active[0].name : null,
+      sinks,
+      browser: true,
+      stale: false,
+    };
+  }).catch((error) => {
+    const state = readState(paths);
+    if (state) clearState(paths);
+    return { activeSink: null, sinks: [], browser: false, stale: true, error };
+  });
+}
+
+function renderWaybarStatus(status) {
+  if (status && status.busy) {
+    return JSON.stringify({
+      text: `${ICON} ...`,
+      class: 'busy',
+      tooltip: status.busy.label || 'Chromecast action in progress…',
+    });
+  }
+
+  if (status && status.activeSink) {
+    return JSON.stringify({
+      text: `${ICON} ${status.activeSink}`,
+      class: 'active',
+      tooltip: `Casting to ${status.activeSink}`,
+    });
+  }
+
+  if (status && status.error && !status.stale) {
+    return JSON.stringify({
+      text: ICON,
+      class: 'error',
+      tooltip: `Chromecast: ${status.error.message}`,
+    });
+  }
+
+  return JSON.stringify({
+    text: ICON,
+    class: 'idle',
+    tooltip: 'Chromecast: idle',
+  });
+}
+
+function writeLine(io, message = '') {
+  io.stdout.write(`${message}\n`);
+}
+
+function writeError(io, message = '') {
+  io.stderr.write(`${message}\n`);
+}
+
+async function commandSinks(paths, options, io) {
+  return withCastClient(paths, {
+    ...options,
+    waitMs: options.waitMs ?? sinkWaitMs(options.env),
+  }, async ({ browser, client, sinks }) => {
+    const output = formatSinkList(sinks);
+    if (output) writeLine(io, output);
+    if (activeSinks(sinks).length === 0) await shutdownBrowser(paths, browser, client);
+    return 0;
+  });
+}
+
+async function commandStart(paths, options, io, requestedName) {
+  if (!requestedName) throw new CliError('Usage: chromium-castctl start <sink-name>', 2);
+
+  return withUiState(paths, 'Starting Chromecast cast…', options, () => withCastClient(paths, {
+    ...options,
+    waitMs: options.waitMs ?? sinkWaitMs(options.env),
+  }, async ({ browser, client, sinks }) => {
+    const sink = matchSink(sinks, requestedName);
+    if (!sink) {
+      await shutdownBrowser(paths, browser, client);
+      const available = formatSinkList(sinks) || '(none)';
+      throw new CliError(`Sink not found: ${requestedName}\nAvailable sinks:\n${available}`, 1);
+    }
+
+    await client.send('Cast.startDesktopMirroring', { sinkName: sink.name }, 10000);
+    updateState(paths, (state) => ({ ...state, lastActiveSink: sink.name }));
+    writeLine(io, `Started desktop mirroring to ${sink.name}. Confirm the Wayland screen-share portal if prompted.`);
+    return 0;
+  }));
+}
+
+async function commandStop(paths, options, io) {
+  return withUiState(paths, 'Stopping Chromecast cast…', options, () => withCastClient(paths, {
+    ...options,
+    launch: false,
+    waitMs: options.waitMs ?? sinkWaitMs(options.env, STATUS_SINK_WAIT_MS),
+  }, async ({ browser, client, sinks }) => {
+    if (!browser || !client) {
+      writeLine(io, 'No chromium-castctl Chromium instance is running; no active cast to stop.');
+      return 0;
+    }
+
+    const active = activeSinks(sinks);
+    if (active.length === 0) {
+      updateState(paths, (state) => ({ ...state, lastActiveSink: null }));
+      await shutdownBrowser(paths, browser, client);
+      writeLine(io, 'No active cast; closed Chromium control browser.');
+      return 0;
+    }
+
+    for (const sink of active) {
+      await client.send('Cast.stopCasting', { sinkName: sink.name }, 10000);
+    }
+    updateState(paths, (state) => ({ ...state, lastActiveSink: null }));
+    await shutdownBrowser(paths, browser, client);
+    writeLine(io, `Stopped casting to ${active.map((sink) => sink.name).join(', ')} and closed Chromium control browser.`);
+    return 0;
+  }));
+}
+
+function spawnPrewarmBrowser(options = {}) {
+  const env = options.env || process.env;
+  const child = childProcess.spawn(process.execPath, [__filename, 'prewarm-browser'], {
+    detached: true,
+    stdio: 'ignore',
+    env,
+  });
+  child.unref();
+  return child;
+}
+
+function runWalker(sinks, options = {}) {
+  const env = options.env || process.env;
+  const walker = findExecutable('walker', env);
+  if (!walker) throw new CliError('walker is not installed or not on PATH; run chromium-castctl start <sink-name> instead.', 1);
+
+  const input = `${sinks.map((sink) => sink.name).join('\n')}\n`;
+  const result = childProcess.spawnSync(walker, ['--dmenu', '--placeholder', 'Cast to…'], {
+    input,
+    encoding: 'utf8',
+    env,
+    timeout: 60000,
+  });
+
+  if (result.error) throw result.error;
+  if (result.status !== 0) return null;
+  return result.stdout.trim() || null;
+}
+
+async function commandPick(paths, options, io) {
+  let token = null;
+  return withUiState(paths, 'Discovering Chromecast targets…', options, async () => {
+    const current = freshUiState(paths);
+    token = current && current.pid === process.pid ? current.token : null;
+
+    const avahiSinks = discoverAvahiSinks(options);
+    if (avahiSinks.length > 0) {
+      const prewarm = spawnPrewarmBrowser(options);
+      if (token) updateUiStateLabel(paths, token, 'Choose a Chromecast target in Walker…', options.env || process.env);
+      const selected = runWalker(avahiSinks, options);
+      if (!selected) {
+        try {
+          process.kill(prewarm.pid, 'SIGTERM');
+        } catch {
+          // Best-effort: the helper may already have exited after launching Chromium.
+        }
+        await sleep(500);
+        await shutdownBrowser(paths, readState(paths), null);
+        writeLine(io, 'No sink selected; closed Chromium control browser.');
+        return 0;
+      }
+
+      if (token) updateUiStateLabel(paths, token, `Starting cast to ${selected}…`, options.env || process.env);
+      return withCastClient(paths, {
+        ...options,
+        waitMs: options.waitMs ?? sinkWaitMs(options.env),
+      }, async ({ browser, client, sinks }) => {
+        const sink = matchSink(sinks, selected);
+        if (!sink) {
+          await shutdownBrowser(paths, browser, client);
+          const available = formatSinkList(sinks) || '(none)';
+          throw new CliError(`Sink not found in Chromium: ${selected}\nAvailable Chromium sinks:\n${available}`, 1);
+        }
+
+        await client.send('Cast.startDesktopMirroring', { sinkName: sink.name }, 10000);
+        updateState(paths, (state) => ({ ...state, lastActiveSink: sink.name }));
+        writeLine(io, `Started desktop mirroring to ${sink.name}. Confirm the Wayland screen-share portal if prompted.`);
+        return 0;
+      });
+    }
+
+    return withCastClient(paths, {
+      ...options,
+      waitMs: options.waitMs ?? sinkWaitMs(options.env),
+    }, async ({ browser, client, sinks }) => {
+      const namedSinks = sinks.filter((sink) => sink.name);
+      if (namedSinks.length === 0) {
+        await shutdownBrowser(paths, browser, client);
+        throw new CliError('No Cast sinks found. Check that Chromium can see the Chromecast and both devices are on the same network.', 1);
+      }
+
+      if (token) updateUiStateLabel(paths, token, 'Choose a Chromecast target in Walker…', options.env || process.env);
+      const selected = runWalker(namedSinks, options);
+      if (!selected) {
+        await shutdownBrowser(paths, browser, client);
+        writeLine(io, 'No sink selected; closed Chromium control browser.');
+        return 0;
+      }
+
+      const sink = matchSink(namedSinks, selected);
+      if (!sink) throw new CliError(`Selected sink disappeared: ${selected}`, 1);
+      await client.send('Cast.startDesktopMirroring', { sinkName: sink.name }, 10000);
+      updateState(paths, (state) => ({ ...state, lastActiveSink: sink.name }));
+      writeLine(io, `Started desktop mirroring to ${sink.name}. Confirm the Wayland screen-share portal if prompted.`);
+      return 0;
+    });
+  });
+}
+
+async function commandToggle(paths, options, io) {
+  const workerToken = options.env && options.env.CHROMIUM_CASTCTL_UI_TOKEN;
+  const busy = workerToken ? null : freshUiState(paths);
+  if (busy) {
+    writeLine(io, busy.label || 'Chromecast action already in progress…');
+    return 0;
+  }
+
+  const status = await getStatus(paths, { ...options, ignoreUiState: Boolean(workerToken) });
+  if (status.activeSink) return commandStop(paths, options, io);
+  return commandPick(paths, options, io);
+}
+
+async function commandWaybarToggle(paths, options, io) {
+  const env = options.env || process.env;
+  const busy = freshUiState(paths);
+  if (busy) return 0;
+
+  const status = await getStatus(paths, { ...options, ignoreUiState: true });
+  const label = status.activeSink ? 'Stopping Chromecast cast…' : 'Discovering Chromecast targets…';
+  const token = beginUiState(paths, label, env);
+  if (!token) return 0;
+
+  const child = childProcess.spawn(process.execPath, [__filename, 'toggle'], {
+    detached: true,
+    stdio: 'ignore',
+    env: {
+      ...env,
+      CHROMIUM_CASTCTL_UI_TOKEN: token,
+    },
+  });
+  child.unref();
+
+  const current = readUiState(paths);
+  if (current && current.token === token) {
+    writeUiState(paths, { ...current, pid: child.pid });
+    signalWaybar(env);
+  }
+
+  writeLine(io, label);
+  return 0;
+}
+
+async function commandQuitBrowser(paths, io) {
+  const closed = await shutdownBrowser(paths, readState(paths), null);
+  writeLine(io, closed ? 'Closed Chromium control browser.' : 'No chromium-castctl Chromium instance is running.');
+  return 0;
+}
+
+async function commandPrewarmBrowser(paths, options) {
+  await ensureChromium(paths, options);
+  return 0;
+}
+
+async function commandStatus(paths, options, io, waybar = false) {
+  const status = await getStatus(paths, options);
+  if (waybar) {
+    writeLine(io, renderWaybarStatus(status));
+    return 0;
+  }
+
+  if (status.busy) {
+    writeLine(io, `busy: ${status.busy.label || 'Chromecast action in progress…'}`);
+  } else if (status.activeSink) {
+    writeLine(io, `active: ${status.activeSink}`);
+  } else {
+    writeLine(io, 'idle');
+  }
+  if (status.stale) writeLine(io, 'stale state was removed');
+  return 0;
+}
+
+function serviceIsActive(service, env = process.env) {
+  const systemctl = findExecutable('systemctl', env);
+  if (!systemctl) return null;
+  const result = childProcess.spawnSync(systemctl, ['--user', 'is-active', '--quiet', service], {
+    env,
+    timeout: 3000,
+  });
+  return result.status === 0;
+}
+
+function readPortalConfig(paths) {
+  try {
+    return fs.readFileSync(paths.hyprPortalConfig, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function addDoctorResult(results, status, name, detail) {
+  results.push({ status, name, detail });
+}
+
+async function collectDoctorResults(paths, options = {}) {
+  const env = options.env || process.env;
+  const results = [];
+
+  addDoctorResult(results, 'ok', 'repository paths', `profile=${paths.profileDir}`);
+  addDoctorResult(results, 'ok', 'normal Chromium profile untouched', 'uses chromium-castctl isolated user-data-dir');
+  addDoctorResult(results, 'ok', 'DevTools bind address', LOCAL_DEVTOOLS_ADDRESS);
+
+  addDoctorResult(results, 'ok', 'Node', process.version);
+  addDoctorResult(results, typeof globalThis.fetch === 'function' ? 'ok' : 'fail', 'Node fetch API', typeof globalThis.fetch);
+  addDoctorResult(results, typeof globalThis.WebSocket === 'function' ? 'ok' : 'fail', 'Node WebSocket API', typeof globalThis.WebSocket);
+
+  const chromium = findExecutable(chromiumCommand(env), env);
+  addDoctorResult(results, chromium ? 'ok' : 'fail', 'Chromium executable', chromium || chromiumCommand(env));
+
+  if (options.uiMode === 'quickshell') {
+    addDoctorResult(results, 'ok', 'Quickshell picker', 'provided by Omarchy shell plugin');
+  } else {
+    const walker = findExecutable('walker', env);
+    addDoctorResult(results, walker ? 'ok' : 'warn', 'Walker executable', walker || 'not found; pick requires walker');
+  }
+
+  const avahi = findExecutable('avahi-browse', env);
+  addDoctorResult(results, avahi ? 'ok' : 'warn', 'Avahi browse executable', avahi || 'not found; pick will fall back to slower Chromium discovery');
+
+  const picker = findExecutable('hyprland-preview-share-picker', env);
+  addDoctorResult(results, picker ? 'ok' : 'warn', 'Hyprland preview share picker', picker || 'not found');
+
+  const portalConfig = readPortalConfig(paths);
+  addDoctorResult(results, portalConfig !== null ? 'ok' : 'warn', 'Hyprland portal config', paths.hyprPortalConfig);
+  if (portalConfig !== null) {
+    const allowsTokens = /^\s*allow_token_by_default\s*=\s*true\s*$/m.test(portalConfig);
+    addDoctorResult(results, allowsTokens ? 'ok' : 'warn', 'portal restore tokens', 'allow_token_by_default = true');
+  }
+
+  for (const service of ['xdg-desktop-portal-hyprland.service', 'pipewire.service', 'pipewire-pulse.service']) {
+    const active = serviceIsActive(service, env);
+    addDoctorResult(results, active ? 'ok' : 'warn', service, active ? 'active' : active === null ? 'systemctl not available' : 'not active');
+  }
+
+  const state = readState(paths);
+  if (state) {
+    const usable = await stateHasUsableCdp(state, { ...options, timeoutMs: 1000 }).catch(() => false);
+    addDoctorResult(results, usable ? 'ok' : 'warn', 'existing chromium-castctl browser', usable ? `pid=${state.pid} port=${state.port}` : 'stale state will be replaced on next start');
+    if (state.remoteDebuggingAddress && state.remoteDebuggingAddress !== LOCAL_DEVTOOLS_ADDRESS) {
+      addDoctorResult(results, 'fail', 'existing DevTools bind address', state.remoteDebuggingAddress);
+    }
+  } else {
+    addDoctorResult(results, 'ok', 'existing chromium-castctl browser', 'not running');
+  }
+
+  return results;
+}
+
+function doctorOptionsFromArgs(args = []) {
+  const uiMode = args.includes('--quickshell') || args.includes('--ui=quickshell') ? 'quickshell' : 'walker';
+  return { uiMode };
+}
+
+async function commandDoctor(paths, options, io, args = []) {
+  const results = await collectDoctorResults(paths, { ...options, ...doctorOptionsFromArgs(args) });
+  for (const result of results) {
+    const prefix = result.status === 'ok' ? 'ok' : result.status === 'warn' ? 'warn' : 'fail';
+    writeLine(io, `${prefix} ${result.name}${result.detail ? `: ${result.detail}` : ''}`);
+  }
+  return results.some((result) => result.status === 'fail') ? 1 : 0;
+}
+
+function usage() {
+  return `Usage: chromium-castctl <command> [args]
+
+Commands:
+  doctor [--quickshell] Check local Chromium/Cast/portal prerequisites
+  sinks                  List available Cast sink names
+  pick                   Pick a sink with Walker, or start the only sink directly
+  start <sink-name>      Start desktop mirroring to a sink
+  stop                   Stop active casting sessions
+  toggle                 Stop if active, otherwise open the sink picker
+  waybar-toggle          Waybar click helper: show busy state, then toggle in background
+  status [--waybar]      Print human status or Waybar JSON
+  quit-browser           Close the isolated Chromium control browser
+  help                   Show this help
+`;
+}
+
+async function run(argv = process.argv.slice(2), io = { stdout: process.stdout, stderr: process.stderr }, env = process.env, deps = {}) {
+  const paths = deps.paths || resolvePaths(env);
+  const options = {
+    env,
+    fetchImpl: deps.fetchImpl,
+    WebSocketImpl: deps.WebSocketImpl,
+    timeoutMs: cdpTimeoutMs(env),
+  };
+
+  const [command, ...args] = argv;
+  try {
+    switch (command) {
+      case undefined:
+      case '-h':
+      case '--help':
+      case 'help':
+        io.stdout.write(usage());
+        return 0;
+      case 'doctor':
+        return await commandDoctor(paths, options, io, args);
+      case 'sinks':
+        return await commandSinks(paths, options, io);
+      case 'pick':
+        return await commandPick(paths, options, io);
+      case 'start':
+        return await commandStart(paths, options, io, args.join(' '));
+      case 'stop':
+        return await commandStop(paths, options, io);
+      case 'toggle':
+        return await commandToggle(paths, options, io);
+      case 'waybar-toggle':
+        return await commandWaybarToggle(paths, options, io);
+      case 'status':
+        return await commandStatus(paths, options, io, args.includes('--waybar'));
+      case 'quit-browser':
+        return await commandQuitBrowser(paths, io);
+      case 'prewarm-browser':
+        return await commandPrewarmBrowser(paths, options);
+      default:
+        throw new CliError(`Unknown command: ${command}\n\n${usage()}`, 2);
+    }
+  } catch (error) {
+    if (error instanceof CliError) {
+      writeError(io, error.message);
+      return error.exitCode;
+    }
+    const state = readState(paths);
+    const logHint = state && state.logFile ? `\nChromium log: ${state.logFile}` : '';
+    writeError(io, `${error.message || String(error)}${logHint}`);
+    return 1;
+  }
+}
+
+if (require.main === module) {
+  run().then((code) => {
+    process.exitCode = code;
+  }).catch((error) => {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  CdpClient,
+  CliError,
+  activeSinks,
+  chromiumLaunchArgs,
+  collectCastSinks,
+  collectDoctorResults,
+  enableCastAndCollectSinks,
+  findExecutable,
+  getPageTarget,
+  getStatus,
+  isPidAlive,
+  matchSink,
+  parseAvahiBrowseOutput,
+  discoverAvahiSinks,
+  minimizeChromiumWindow,
+  minimizePageWindow,
+  readState,
+  renderWaybarStatus,
+  resolvePaths,
+  run,
+  selectPageTarget,
+  sinkIsActive,
+  updateState,
+  writeState,
+};

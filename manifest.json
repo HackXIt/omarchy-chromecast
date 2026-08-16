@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "hackxit.chromecast",
+  "name": "HackXIt Chromecast",
+  "version": "0.1.0",
+  "author": "HackXIt",
+  "description": "Chromecast bar widget and popup controls backed by chromium-castctl",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Chromecast.qml"
+  },
+  "barWidget": {
+    "displayName": "Chromecast",
+    "description": "Shows chromium-castctl status with target picker, stop, refresh, and doctor controls",
+    "category": "Media",
+    "defaultSection": "right",
+    "allowMultiple": false
+  }
+}

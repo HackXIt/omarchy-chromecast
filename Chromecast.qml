@@ -1,0 +1,652 @@
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import Quickshell
+import Quickshell.Io
+import qs.Commons
+import qs.Ui
+
+BarWidget {
+  id: root
+  moduleName: "hackxit.chromecast"
+
+  property string ipcTarget: "hackxit.chromecast"
+  property bool opened: false
+  property bool popoutSwitchClosing: false
+  readonly property color barForeground: bar ? bar.barForeground : Color.foreground
+
+  function open() { opened = true }
+  function close() { opened = false }
+  function toggle() { opened ? close() : open() }
+  function closeForPopoutSwitch() {
+    popoutSwitchClosing = true
+    close()
+    Qt.callLater(function() { popoutSwitchClosing = false })
+  }
+  function switchPanel(direction) {
+    if (bar && typeof bar.switchPanelFrom === "function") return bar.switchPanelFrom(root, direction)
+    return false
+  }
+
+  property string statusText: ""
+  property string statusTooltip: "Chromecast"
+  property string statusClass: ""
+  property bool statusActive: false
+  property bool statusBusy: false
+  property string activeSink: ""
+  property var sinks: []
+  property string actionStatus: ""
+  property string lastError: ""
+  property string focusSection: "actions"
+  property int actionIndex: 0
+  property int sinkIndex: 0
+  property bool cursorActive: false
+
+  readonly property string bundledCastctl: Quickshell.env("HOME") + "/.config/omarchy/plugins/hackxit.chromecast/bin/chromium-castctl"
+  readonly property string castctl: String(setting("castctl", bundledCastctl))
+  readonly property int intervalMs: Math.max(1000, Number(setting("intervalMs", 5000)))
+  readonly property bool alwaysVisible: setting("alwaysVisible", false) === true
+  readonly property bool commandBusy: actionProc.running || sinksProc.running
+  readonly property bool busy: statusBusy || commandBusy
+  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color dim: Qt.darker(foreground, 1.55)
+  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property color idleIconColor: Qt.darker(barForeground, 1.55)
+  readonly property color activeIconColor: barForeground
+  readonly property string heroTitle: activeSink !== "" ? activeSink : "Chromecast"
+  readonly property string heroMeta: statusBusy ? statusTooltip : (statusActive ? "Desktop mirroring is active" : "Ready to cast this desktop")
+  readonly property string heroDetail: statusBusy ? "BUSY" : (statusActive ? "ACTIVE" : "IDLE")
+  readonly property string toggleHint: statusActive ? "Stop casting" : "Choose a target"
+  readonly property var actions: buildActions()
+
+  visible: alwaysVisible || statusText !== "" || lastError !== ""
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
+  function classContains(klass, needle) {
+    if (Array.isArray(klass)) return klass.indexOf(needle) !== -1
+    return String(klass || "").toLowerCase().indexOf(needle) !== -1
+  }
+
+  function buildActions() {
+    var rows = []
+    rows.push({ kind: "pick", icon: "󰐊", label: statusActive ? "Change target" : "Start casting", subtitle: sinks.length > 0 ? "Choose from the targets below" : "Scan for available Chromecast targets", enabled: !commandBusy })
+    rows.push({ kind: "stop", icon: "", label: "Stop casting", subtitle: statusActive ? "Stop the active desktop mirror" : "No active cast to stop", enabled: !commandBusy && (statusActive || statusBusy || activeSink !== "") })
+    rows.push({ kind: "refresh", icon: "󰑐", label: "Refresh targets", subtitle: sinksProc.running ? "Scanning…" : "Update status and available sinks", enabled: !sinksProc.running })
+    rows.push({ kind: "doctor", icon: "󰒡", label: "Run doctor", subtitle: "Open diagnostics in a floating terminal", enabled: true })
+    rows.push({ kind: "quit", icon: "󰗼", label: "Quit control browser", subtitle: "Close the isolated Chromium controller", enabled: !commandBusy })
+    return rows
+  }
+
+  function parseStatus(raw) {
+    var trimmed = String(raw || "").trim()
+    if (trimmed === "") {
+      statusText = ""
+      statusTooltip = "Chromecast"
+      statusClass = ""
+      statusActive = false
+      statusBusy = false
+      activeSink = ""
+      return
+    }
+
+    try {
+      var data = JSON.parse(trimmed)
+      statusText = String(data.text || "")
+      statusTooltip = String(data.tooltip || "Chromecast")
+      statusClass = data.class || data.alt || ""
+      statusActive = classContains(statusClass, "active") || classContains(statusClass, "playing")
+      statusBusy = classContains(statusClass, "busy")
+      activeSink = ""
+      if (statusActive) {
+        var prefix = "Casting to "
+        if (statusTooltip.indexOf(prefix) === 0) activeSink = statusTooltip.slice(prefix.length)
+        else activeSink = statusText.replace(/^\S+\s*/, "")
+      }
+      if (!statusBusy && lastError === "chromium-castctl status failed") lastError = ""
+    } catch (e) {
+      statusText = ""
+      statusTooltip = trimmed
+      statusClass = ""
+      statusActive = false
+      statusBusy = false
+      activeSink = ""
+    }
+  }
+
+  function parseSinks(raw) {
+    var rows = []
+    var seen = {}
+    var lines = String(raw || "").split(/\r?\n/)
+    for (var i = 0; i < lines.length; i++) {
+      var name = String(lines[i] || "").trim()
+      if (name === "" || seen[name]) continue
+      seen[name] = true
+      rows.push(name)
+    }
+    sinks = rows
+    if (sinkIndex >= sinks.length) sinkIndex = Math.max(0, sinks.length - 1)
+    ensureCursor()
+  }
+
+  function refresh() {
+    if (!statusProc.running) statusProc.running = true
+  }
+
+  function refreshSinks() {
+    if (sinksProc.running) return
+    sinksProc.outputText = ""
+    sinksProc.errorText = ""
+    sinksProc.command = [castctl, "sinks"]
+    sinksProc.running = true
+  }
+
+  function refreshAll() {
+    refresh()
+    refreshSinks()
+  }
+
+  function shellQuote(value) {
+    if (bar && typeof bar.shellQuote === "function") return bar.shellQuote(value)
+    return "'" + String(value || "").replace(/'/g, "'\"'\"'") + "'"
+  }
+
+  function runDoctor() {
+    if (!bar || typeof bar.run !== "function") {
+      lastError = "Cannot launch Chromecast doctor without the bar host."
+      return
+    }
+    var command = shellQuote(castctl) + " doctor --quickshell"
+    bar.run("omarchy-launch-floating-terminal-with-presentation " + shellQuote(command))
+    actionStatus = "Opened Chromecast doctor in a terminal."
+    close()
+  }
+
+  function runCastctl(args, label, closePanel) {
+    if (actionProc.running) {
+      actionStatus = "Chromecast action already running…"
+      return
+    }
+    actionProc.outputText = ""
+    actionProc.errorText = ""
+    actionStatus = label
+    lastError = ""
+    actionProc.command = [castctl].concat(args)
+    actionProc.running = true
+    refreshSoon.restart()
+    if (closePanel) close()
+  }
+
+  function chooseTarget() {
+    if (commandBusy) return
+    if (sinks.length === 1) {
+      startSink(sinks[0])
+      return
+    }
+    if (sinks.length > 1) {
+      cursorActive = true
+      focusSection = "sinks"
+      sinkIndex = 0
+      actionStatus = "Choose a Chromecast target below."
+      return
+    }
+    actionStatus = "Scanning for Chromecast targets…"
+    refreshSinks()
+  }
+
+  function pickTarget() { chooseTarget() }
+  function stopCasting() { runCastctl(["stop"], "Stopping Chromecast cast…", false) }
+  function quitBrowser() { runCastctl(["quit-browser"], "Closing Chromium control browser…", false) }
+  function startSink(name) { if (name) runCastctl(["start", String(name)], "Starting cast to " + String(name) + "…", true) }
+  function toggleCast() { statusActive ? stopCasting() : pickTarget() }
+
+  function activateAction(kind) {
+    if (kind === "pick") pickTarget()
+    else if (kind === "stop") stopCasting()
+    else if (kind === "refresh") refreshAll()
+    else if (kind === "doctor") runDoctor()
+    else if (kind === "quit") quitBrowser()
+  }
+
+  function ensureCursor() {
+    if (actionIndex >= actions.length) actionIndex = Math.max(0, actions.length - 1)
+    if (sinkIndex >= sinks.length) sinkIndex = Math.max(0, sinks.length - 1)
+    if (focusSection === "sinks" && sinks.length === 0) focusSection = "actions"
+  }
+
+  function moveCursor(dx, dy) {
+    cursorActive = true
+    ensureCursor()
+    if (dy === 0) return
+    if (focusSection === "actions") {
+      if (dy > 0) {
+        if (actionIndex < actions.length - 1) actionIndex++
+        else if (sinks.length > 0) focusSection = "sinks"
+      } else if (actionIndex > 0) {
+        actionIndex--
+      }
+    } else if (focusSection === "sinks") {
+      if (dy > 0) {
+        if (sinkIndex < sinks.length - 1) sinkIndex++
+      } else {
+        if (sinkIndex > 0) sinkIndex--
+        else focusSection = "actions"
+      }
+    }
+  }
+
+  function activateCursor() {
+    ensureCursor()
+    if (focusSection === "actions") {
+      var action = actions[Math.max(0, Math.min(actionIndex, actions.length - 1))]
+      if (action && action.enabled !== false) activateAction(action.kind)
+    } else if (focusSection === "sinks") {
+      startSink(sinks[Math.max(0, Math.min(sinkIndex, sinks.length - 1))])
+    }
+  }
+
+  function setActionCursor(index) {
+    cursorActive = true
+    focusSection = "actions"
+    actionIndex = index
+  }
+
+  function setSinkCursor(index) {
+    cursorActive = true
+    focusSection = "sinks"
+    sinkIndex = index
+  }
+
+  onOpenedChanged: if (opened) {
+    cursorActive = false
+    actionIndex = 0
+    sinkIndex = 0
+    if (panelFlick) panelFlick.contentY = 0
+    refreshAll()
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  Component.onCompleted: refresh()
+
+  IpcHandler {
+    target: root.ipcTarget
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.toggle() }
+    function refresh(): string { root.refreshAll(); return "ok" }
+    function status(): string { return root.statusTooltip }
+    function stop(): string { root.stopCasting(); return "ok" }
+    function pick(): string { root.pickTarget(); return "ok" }
+    function doctor(): string { root.runDoctor(); return "ok" }
+  }
+
+  BarIconButton {
+    id: button
+    anchors.fill: parent
+    bar: root.bar
+    tooltipText: root.statusTooltip
+    iconComponent: Component {
+      Item {
+        Text {
+          anchors.centerIn: parent
+          text: ""
+          color: root.lastError !== "" ? root.urgent : (root.statusActive || root.statusBusy ? root.activeIconColor : root.idleIconColor)
+          font.family: root.fontFamily
+          font.pixelSize: Style.bar.iconFont
+        }
+      }
+    }
+    onPressed: function(buttonCode) {
+      if (buttonCode === Qt.RightButton) root.stopCasting()
+      else if (buttonCode === Qt.MiddleButton) root.refreshAll()
+      else root.toggle()
+    }
+  }
+
+  KeyboardPanel {
+    id: panel
+    anchorItem: button
+    owner: root
+    bar: root.bar
+    open: root.opened
+    focusTarget: keyCatcher
+    contentWidth: panel.fittedContentWidth(Style.space(390))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(560))
+
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
+      onActivateRequested: root.activateCursor()
+      onCloseRequested: root.close()
+      onTabRequested: function(direction) { root.switchPanel(direction) }
+      onTextKey: function(t) {
+        if (t === "r" || t === "R") root.refreshAll()
+        else if (t === "s" || t === "S") root.stopCasting()
+        else if (t === "p" || t === "P") root.pickTarget()
+        else if (t === "d" || t === "D") root.runDoctor()
+      }
+
+      Flickable {
+        id: panelFlick
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: column.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        Column {
+          id: column
+          width: panelFlick.width
+          spacing: Style.space(12)
+
+          PanelHero {
+            id: hero
+            width: parent.width
+            title: root.heroTitle
+            meta: root.heroMeta
+            detail: root.heroDetail
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            iconOpacity: root.statusActive || root.statusBusy ? 1.0 : 0.55
+            iconComponent: Component {
+              Text {
+                text: ""
+                color: root.statusActive || root.statusBusy ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.display
+              }
+            }
+            trailingControl: Component {
+              PanelActionButton {
+                iconText: root.statusActive ? "" : "󰐊"
+                tooltipText: root.toggleHint
+                foreground: hero.foreground
+                fontFamily: hero.fontFamily
+                enabled: !root.commandBusy
+                onClicked: root.toggleCast()
+              }
+            }
+          }
+
+          Text {
+            visible: root.actionStatus !== "" || root.lastError !== ""
+            width: parent.width
+            text: root.lastError !== "" ? root.lastError : root.actionStatus
+            color: root.lastError !== "" ? root.urgent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          PanelSeparator { foreground: root.foreground }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(8)
+
+            PanelSectionHeader {
+              text: "ACTIONS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: root.actions
+              ActionRow {
+                required property var modelData
+                required property int index
+                width: parent.width
+                action: modelData
+                rowIndex: index
+              }
+            }
+          }
+
+          PanelSeparator { foreground: root.foreground }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(8)
+
+            PanelSectionHeader {
+              text: "TARGETS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Text {
+              visible: root.sinks.length === 0
+              width: parent.width
+              text: sinksProc.running ? "Scanning for Chromecast targets…" : "No Chromecast targets found. Make sure the target is awake and on this network."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              wrapMode: Text.WordWrap
+              horizontalAlignment: Text.AlignHCenter
+            }
+
+            Column {
+              id: sinkColumn
+              visible: root.sinks.length > 0
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                model: root.sinks
+                SinkRow {
+                  required property var modelData
+                  required property int index
+                  width: parent.width
+                  sinkName: String(modelData || "")
+                  rowIndex: index
+                }
+              }
+            }
+          }
+
+        }
+      }
+    }
+  }
+
+  Timer {
+    interval: root.intervalMs
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.refresh()
+  }
+
+  Timer {
+    id: refreshSoon
+    interval: 800
+    onTriggered: root.refresh()
+  }
+
+  Timer {
+    id: delayedRefresh
+    interval: 1600
+    onTriggered: root.refreshAll()
+  }
+
+  Process {
+    id: statusProc
+    command: [root.castctl, "status", "--waybar"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.parseStatus(text) }
+    stderr: StdioCollector { id: statusStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.lastError = "chromium-castctl status failed"
+        root.statusText = ""
+        root.statusTooltip = String(statusStderr.text || "Chromecast status failed").trim()
+        root.statusActive = false
+        root.statusBusy = false
+      }
+    }
+  }
+
+  Process {
+    id: sinksProc
+    property string outputText: ""
+    property string errorText: ""
+    running: false
+    command: []
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: sinksProc.outputText = String(text || "") }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: sinksProc.errorText = String(text || "") }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.parseSinks(outputText)
+      else root.lastError = String(errorText || outputText || "Could not list Chromecast targets").trim()
+    }
+  }
+
+  Process {
+    id: actionProc
+    property string outputText: ""
+    property string errorText: ""
+    running: false
+    command: []
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: actionProc.outputText = String(text || "") }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: actionProc.errorText = String(text || "") }
+    onExited: function(exitCode) {
+      var out = String(outputText || "").trim()
+      var err = String(errorText || "").trim()
+      if (exitCode === 0) {
+        if (out !== "") root.actionStatus = out
+      } else {
+        root.lastError = err !== "" ? err : (out !== "" ? out : "Chromecast action failed")
+      }
+      delayedRefresh.restart()
+    }
+  }
+
+  component ActionRow: CursorSurface {
+    id: actionRow
+    property var action: null
+    property int rowIndex: 0
+    readonly property bool rowEnabled: action && action.enabled !== false
+
+    hasCursor: root.cursorActive && root.focusSection === "actions" && root.actionIndex === rowIndex
+    foreground: root.foreground
+    implicitHeight: row.implicitHeight + Style.spacing.rowPaddingX
+    opacity: rowEnabled ? 1.0 : 0.45
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      enabled: actionRow.rowEnabled
+      cursorShape: actionRow.rowEnabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+      onEntered: root.setActionCursor(actionRow.rowIndex)
+      onClicked: root.activateAction(String(actionRow.action.kind || ""))
+    }
+
+    RowLayout {
+      id: row
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(9)
+
+      Text {
+        text: actionRow.action ? String(actionRow.action.icon || "") : ""
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.icon
+        Layout.alignment: Qt.AlignVCenter
+      }
+
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(1)
+
+        Text {
+          Layout.fillWidth: true
+          text: actionRow.action ? String(actionRow.action.label || "") : ""
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+        }
+
+        Text {
+          Layout.fillWidth: true
+          text: actionRow.action ? String(actionRow.action.subtitle || "") : ""
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+    }
+  }
+
+  component SinkRow: CursorSurface {
+    id: sinkRow
+    property string sinkName: ""
+    property int rowIndex: 0
+    readonly property bool currentSink: root.statusActive && root.activeSink === sinkName
+
+    hasCursor: root.cursorActive && root.focusSection === "sinks" && root.sinkIndex === rowIndex
+    current: currentSink
+    foreground: root.foreground
+    implicitHeight: row.implicitHeight + Style.spacing.rowPaddingX
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onEntered: root.setSinkCursor(sinkRow.rowIndex)
+      onClicked: root.startSink(sinkRow.sinkName)
+    }
+
+    RowLayout {
+      id: row
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(9)
+
+      Text {
+        text: ""
+        color: sinkRow.currentSink ? root.foreground : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.icon
+        Layout.alignment: Qt.AlignVCenter
+      }
+
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(1)
+
+        Text {
+          Layout.fillWidth: true
+          text: sinkRow.sinkName
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: sinkRow.currentSink
+          elide: Text.ElideRight
+        }
+
+        Text {
+          Layout.fillWidth: true
+          text: sinkRow.currentSink ? "Currently casting" : "Start desktop mirroring"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+@keyframes chromecast-busy {
+  to {
+    color: #e0af68;
+  }
+}
+
+#custom-chromecast {
+  min-width: 12px;
+  margin-right: 13px;
+  font-family: "Chromium Castctl Icons", "JetBrainsMono Nerd Font";
+}
+
+#custom-chromecast.busy {
+  animation-name: chromecast-busy;
+  animation-duration: 0.7s;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+
+#custom-chromecast.active {
+  color: #9ece6a;
+}
