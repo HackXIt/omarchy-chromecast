@@ -312,16 +312,25 @@ Run tests with Node's built-in test runner and validate the plugin manifest:
 ```bash
 ./scripts/validate-plugin.sh .
 node --test
+node --check bin/chromium-castctl
+bash -n install.sh scripts/validate-plugin.sh
 ```
 
-The GitHub Actions workflow runs both checks on pushes and pull requests. Omarchy Marketplace verification is separate: the marketplace must scan and record the exact listed commit before it can display `Verified`.
+The GitHub Actions workflow runs these checks on pushes and pull requests. Omarchy Marketplace verification is separate: the marketplace must scan and record the exact listed commit before it can display `Verified`.
 
 No npm dependencies are required.
 
-## Contributing and support
+For bugs and focused feature requests, use [GitHub Issues](https://github.com/HackXIt/omarchy-chromecast/issues). Keep pull requests small and include the validation commands you ran.
 
-- See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
-- Use [GitHub Issues](https://github.com/HackXIt/omarchy-chromecast/issues) for reproducible bugs and focused feature requests.
-- Use [GitHub Discussions](https://github.com/HackXIt/omarchy-chromecast/discussions) for questions and troubleshooting.
-- Please follow the [Code of Conduct](CODE_OF_CONDUCT.md).
-- Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
+## Releases
+
+Releases are tag-driven. The tag version must match `manifest.json`.
+
+```bash
+git switch main
+git pull --ff-only upstream main
+git tag -a v0.1.0 -m "v0.1.0"
+git push upstream v0.1.0
+```
+
+Pushing a `v*.*.*` tag runs the release workflow, validates the plugin/helper, and publishes a GitHub Release with source archives.

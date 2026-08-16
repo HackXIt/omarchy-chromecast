@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Validate and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Verify tag matches manifest version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          manifest_version="$(jq -r '.version' manifest.json)"
+          if [[ "$tag" == "$version" ]]; then
+            echo "Release tags must start with v, got: $tag" >&2
+            exit 1
+          fi
+          if [[ "$manifest_version" != "$version" ]]; then
+            echo "manifest.json version ($manifest_version) does not match tag ($tag)" >&2
+            exit 1
+          fi
+
+      - name: Validate Omarchy plugin manifest
+        run: ./scripts/validate-plugin.sh .
+
+      - name: Run helper tests
+        run: node --test
+
+      - name: Check helper syntax
+        run: node --check bin/chromium-castctl
+
+      - name: Check shell script syntax
+        run: bash -n install.sh scripts/validate-plugin.sh
+
+      - name: Build release archives
+        run: |
+          mkdir -p dist
+          prefix="omarchy-chromecast-${GITHUB_REF_NAME}/"
+          git archive --format=tar.gz --prefix="$prefix" -o "dist/omarchy-chromecast-${GITHUB_REF_NAME}.tar.gz" "$GITHUB_SHA"
+          git archive --format=zip --prefix="$prefix" -o "dist/omarchy-chromecast-${GITHUB_REF_NAME}.zip" "$GITHUB_SHA"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/omarchy-chromecast-${GITHUB_REF_NAME}.tar.gz \
+            dist/omarchy-chromecast-${GITHUB_REF_NAME}.zip \
+            --verify-tag \
+            --title "omarchy-chromecast ${GITHUB_REF_NAME}" \
+            --generate-notes
