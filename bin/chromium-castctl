@@ -394,7 +394,7 @@ function chromiumLaunchArgs(paths, port, env = process.env) {
 }
 
 async function waitForCdp(port, options = {}) {
-  const timeoutMs = options.timeoutMs || browserStartTimeoutMs(options.env || process.env);
+  const timeoutMs = options.browserStartTimeoutMs || browserStartTimeoutMs(options.env || process.env);
   const started = Date.now();
   let lastError;
 
@@ -1291,6 +1291,7 @@ async function run(argv = process.argv.slice(2), io = { stdout: process.stdout, 
     fetchImpl: deps.fetchImpl,
     WebSocketImpl: deps.WebSocketImpl,
     timeoutMs: cdpTimeoutMs(env),
+    browserStartTimeoutMs: browserStartTimeoutMs(env),
   };
 
   const [command, ...args] = argv;
