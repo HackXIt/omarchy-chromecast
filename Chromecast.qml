@@ -37,6 +37,7 @@ BarWidget {
   property var sinks: []
   property string actionStatus: ""
   property string lastError: ""
+  property bool targetRefreshError: false
   property string focusSection: "actions"
   property int actionIndex: 0
   property int sinkIndex: 0
@@ -126,6 +127,10 @@ BarWidget {
       rows.push(name)
     }
     sinks = rows
+    if (targetRefreshError) {
+      lastError = ""
+      targetRefreshError = false
+    }
     if (sinkIndex >= sinks.length) sinkIndex = Math.max(0, sinks.length - 1)
     ensureCursor()
   }
@@ -138,6 +143,10 @@ BarWidget {
     if (sinksProc.running) return
     sinksProc.outputText = ""
     sinksProc.errorText = ""
+    if (targetRefreshError) {
+      lastError = ""
+      targetRefreshError = false
+    }
     sinksProc.command = [castctl, "sinks"]
     sinksProc.running = true
   }
@@ -172,6 +181,7 @@ BarWidget {
     actionProc.errorText = ""
     actionStatus = label
     lastError = ""
+    targetRefreshError = false
     actionProc.command = [castctl].concat(args)
     actionProc.running = true
     refreshSoon.restart()
@@ -483,6 +493,7 @@ BarWidget {
     stderr: StdioCollector { id: statusStderr; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode !== 0) {
+        root.targetRefreshError = false
         root.lastError = "chromium-castctl status failed"
         root.statusText = ""
         root.statusTooltip = String(statusStderr.text || "Chromecast status failed").trim()
@@ -502,7 +513,10 @@ BarWidget {
     stderr: StdioCollector { waitForEnd: true; onStreamFinished: sinksProc.errorText = String(text || "") }
     onExited: function(exitCode) {
       if (exitCode === 0) root.parseSinks(outputText)
-      else root.lastError = String(errorText || outputText || "Could not list Chromecast targets").trim()
+      else {
+        root.targetRefreshError = true
+        root.lastError = String(errorText || outputText || "Could not list Chromecast targets").trim()
+      }
     }
   }
 
@@ -520,6 +534,7 @@ BarWidget {
       if (exitCode === 0) {
         if (out !== "") root.actionStatus = out
       } else {
+        root.targetRefreshError = false
         root.lastError = err !== "" ? err : (out !== "" ? out : "Chromecast action failed")
       }
       delayedRefresh.restart()
