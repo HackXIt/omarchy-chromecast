@@ -1,8 +1,1 @@
 blank_issues_enabled: true
-contact_links:
-  - name: Questions and troubleshooting
-    url: https://github.com/HackXIt/omarchy-chromecast/discussions
-    about: Use Discussions for questions that are not yet confirmed bugs.
-  - name: Security reports
-    url: https://github.com/HackXIt/omarchy-chromecast/security/advisories/new
-    about: Please do not report vulnerabilities in public issues.
