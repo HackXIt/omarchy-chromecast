@@ -16,7 +16,10 @@ fi
 mkdir -p "$target_dir"
 ln -sfn "$source_bin" "$target"
 
-if [[ -r "$font_source" ]]; then
+if [[ -r "$font_source" ]] && python - <<'PY' >/dev/null 2>&1
+import fontTools.ttLib
+PY
+then
   mkdir -p "$font_dir"
   SRC_FONT="$font_source" DST_FONT="$font_target" python - <<'PY'
 from fontTools.ttLib import TTFont
@@ -44,6 +47,8 @@ font.save(dst)
 PY
   fc-cache -f "$font_dir" >/dev/null 2>&1 || true
   installed_font_message="Installed Chromecast icon font -> $font_target"
+elif [[ -r "$font_source" ]]; then
+  installed_font_message="Warning: Python fontTools is not installed; skipped optional legacy Waybar icon font"
 else
   installed_font_message="Warning: $font_source not found; Waybar may render the Chromecast glyph as a missing-glyph box"
 fi
