@@ -1,10 +1,29 @@
 # Omarchy Chromecast / chromium-castctl
 
+[![CI](https://github.com/HackXIt/omarchy-chromecast/actions/workflows/ci.yml/badge.svg)](https://github.com/HackXIt/omarchy-chromecast/actions/workflows/ci.yml)
+
 This repository is an Omarchy Quattro shell plugin plus a dependency-free Node helper CLI for desktop casting to Chromecast.
 
 The plugin provides a native Quickshell bar widget and popup UI for choosing targets, starting/stopping desktop mirroring, and refreshing targets. Diagnostics open in an Omarchy floating terminal so the full command output stays readable and waits for the user before closing. The bundled `chromium-castctl` helper controls Chromium's built-in Google Cast backend over the Chrome DevTools Protocol (CDP).
 
 Chromium performs the actual casting. This project only launches an isolated Chromium control instance and sends CDP Cast commands.
+
+This project was vibe-coded from the practical need to have a simple "cast this desktop" button in Omarchy without building a full media-router implementation. The tradeoff is a slower UX: discovery, the isolated Chromium controller, CDP commands, and the Wayland portal prompt can take a moment. In exchange, the implementation stays small and relies on Chromium's already-existing casting capabilities instead of reimplementing them.
+
+## Showcase
+
+<p align="center">
+  <img src="assets/screenshots/screen-selection.png" alt="Selecting an Omarchy screen or output to cast" width="820">
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/idle.png" alt="Chromecast widget idle state with available target" width="360">
+  <img src="assets/screenshots/casting-active.png" alt="Chromecast widget active casting state" width="360">
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/doctor.png" alt="Chromecast doctor diagnostics running in a floating terminal" width="820">
+</p>
 
 ## Safety properties
 
@@ -276,10 +295,13 @@ Audio must be validated empirically by starting a cast and playing system audio.
 
 ## Development
 
-Run tests with Node's built-in test runner:
+Run tests with Node's built-in test runner and validate the plugin manifest:
 
 ```bash
+./scripts/validate-plugin.sh .
 node --test
 ```
+
+The GitHub Actions workflow runs both checks on pushes and pull requests. Omarchy Marketplace verification is separate: the marketplace must scan and record the exact listed commit before it can display `Verified`.
 
 No npm dependencies are required.
