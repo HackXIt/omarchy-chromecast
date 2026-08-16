@@ -145,6 +145,15 @@ test('state read/write round-trips JSON state', () => {
   assert.deepEqual(mod.readState(paths), state);
 });
 
+test('executable lookup respects an explicitly empty PATH', () => {
+  assert.equal(mod.findExecutable('node', { PATH: '' }), null);
+});
+
+test('executable lookup falls back to the process PATH when PATH is absent', () => {
+  assert.equal(mod.findExecutable(process.execPath, {}), process.execPath);
+  assert.ok(mod.findExecutable('node', {}));
+});
+
 test('chromium launch args use an isolated headless profile and localhost-only DevTools', () => {
   const paths = mod.resolvePaths({ HOME: tempHome() });
   const args = mod.chromiumLaunchArgs(paths, 9333, {});

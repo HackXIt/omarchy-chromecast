@@ -211,7 +211,9 @@ function findExecutable(command, env = process.env) {
     return isExecutable(full) ? full : null;
   }
 
-  const pathValue = env.PATH || process.env.PATH || '';
+  const pathValue = Object.prototype.hasOwnProperty.call(env, 'PATH')
+    ? (env.PATH || '')
+    : (process.env.PATH || '');
   for (const dir of pathValue.split(path.delimiter)) {
     if (!dir) continue;
     const candidate = path.join(dir, command);
