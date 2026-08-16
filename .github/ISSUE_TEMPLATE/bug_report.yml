@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a reproducible problem with the plugin or helper CLI
+title: "Bug: "
+labels: [bug]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: List exact commands or UI steps.
+      placeholder: |
+        1. Run `chromium-castctl ...`
+        2. Click ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste relevant output from doctor/status/sinks and logs.
+      render: text
+      placeholder: |
+        chromium-castctl doctor --quickshell
+        chromium-castctl status
+        chromium-castctl sinks
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Omarchy/Quickshell/Chromium/Node versions if known.
+    validations:
+      required: false
