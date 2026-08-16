@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/HackXIt/omarchy-chromecast/actions/workflows/ci.yml/badge.svg)](https://github.com/HackXIt/omarchy-chromecast/actions/workflows/ci.yml)
 
-This repository is an Omarchy Quattro shell plugin plus a dependency-free Node helper CLI for desktop casting to Chromecast.
+This repository is primarily an **Omarchy Quattro** shell plugin for desktop casting to Chromecast. It also keeps a dependency-free `chromium-castctl` helper CLI for legacy/pre-Quattro Omarchy setups that used Waybar or direct command-line integration.
 
-The plugin provides a native Quickshell bar widget and popup UI for choosing targets, starting/stopping desktop mirroring, and refreshing targets. Diagnostics open in an Omarchy floating terminal so the full command output stays readable and waits for the user before closing. The bundled `chromium-castctl` helper controls Chromium's built-in Google Cast backend over the Chrome DevTools Protocol (CDP).
+On Omarchy Quattro, the plugin provides a native Quickshell bar widget and popup UI for choosing targets, starting/stopping desktop mirroring, and refreshing targets. Diagnostics open in an Omarchy floating terminal so the full command output stays readable and waits for the user before closing. The bundled `chromium-castctl` helper controls Chromium's built-in Google Cast backend over the Chrome DevTools Protocol (CDP).
 
 Chromium performs the actual casting. This project only launches an isolated Chromium control instance and sends CDP Cast commands.
 
@@ -37,23 +37,32 @@ This project was vibe-coded from the practical need to have a simple "cast this 
 
 ## Requirements
 
+### Omarchy Quattro plugin mode
+
+- Omarchy Quattro / `omarchy-shell` for the native Quickshell widget UI.
 - `node` with built-in `fetch` and `WebSocket`.
 - `chromium` on `PATH`.
-- Omarchy Quattro / `omarchy-shell` for the native plugin UI.
 - `avahi-browse` for fast live Chromecast target discovery; without it, target discovery falls back to slower Chromium discovery.
-- Optional: `walker` only for the legacy CLI `pick` command and Waybar `waybar-toggle` helper.
 - Hyprland portal stack for desktop capture:
   - `xdg-desktop-portal-hyprland.service`
   - `hyprland-preview-share-picker`
   - PipeWire and PipeWire Pulse services
 
-Check the local machine for plugin mode with:
+### Legacy/pre-Quattro CLI and Waybar mode
+
+- The same `node`, `chromium`, Avahi, and portal stack requirements as plugin mode.
+- Optional: `walker` for the legacy CLI `pick` command.
+- Optional: Waybar if you want to wire `status --waybar` or `waybar-toggle` into a pre-Quattro bar.
+
+Check the local machine for Quattro plugin mode with:
 
 ```bash
 ./bin/chromium-castctl doctor --quickshell
 ```
 
-## Install as an Omarchy plugin
+## Install on Omarchy Quattro
+
+This is the recommended path for current Omarchy. `omarchy plugin add` clones the repository as a shell plugin; it does **not** run `install.sh`. The plugin calls the bundled helper at `bin/chromium-castctl` directly.
 
 From a published repository:
 
@@ -81,7 +90,9 @@ The plugin uses the bundled helper at `bin/chromium-castctl` by default. Overrid
 { "id": "hackxit.chromecast", "castctl": "/path/to/chromium-castctl" }
 ```
 
-## Optional legacy CLI install
+## Optional legacy/pre-Quattro CLI install
+
+This path is only for direct CLI usage or older/pre-Quattro Omarchy setups that still use Waybar integration. It is not needed for the Quattro plugin above.
 
 For using `chromium-castctl` directly outside the plugin, from this regular clone:
 
@@ -91,7 +102,7 @@ command -v chromium-castctl
 chromium-castctl doctor
 ```
 
-`install.sh` symlinks `bin/chromium-castctl` to `~/.local/bin/chromium-castctl` and installs a Waybar icon font for legacy Waybar integration.
+`install.sh` symlinks `bin/chromium-castctl` to `~/.local/bin/chromium-castctl` and optionally installs a Waybar icon font for legacy/pre-Quattro Waybar integration. It does not install or enable the Omarchy Quattro plugin.
 
 ## Usage
 
@@ -146,9 +157,10 @@ screencopy {
 
 then portal restore tokens may reduce future prompts, depending on Chromium and portal behavior.
 
-## Legacy Waybar integration
+## Legacy/pre-Quattro Waybar integration
 
-This repository includes `waybar-module.jsonc` and `waybar-style.css`:
+This repository includes `waybar-module.jsonc` and `waybar-style.css` for older Omarchy or other Waybar-based desktops. Omarchy Quattro users should prefer the native plugin widget and normally do not need this section.
+
 
 ```jsonc
 "custom/chromecast": {

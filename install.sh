@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Legacy/pre-Quattro helper install only.
+# Omarchy Quattro installs this repository with `omarchy plugin add` and calls
+# bin/chromium-castctl directly; it does not run this script.
+
 repo_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source_bin="$repo_dir/bin/chromium-castctl"
 target_dir="${HOME:?}/.local/bin"
@@ -46,16 +50,20 @@ for record in font['name'].names:
 font.save(dst)
 PY
   fc-cache -f "$font_dir" >/dev/null 2>&1 || true
-  installed_font_message="Installed Chromecast icon font -> $font_target"
+  installed_font_message="Installed legacy/pre-Quattro Waybar icon font -> $font_target"
 elif [[ -r "$font_source" ]]; then
-  installed_font_message="Warning: Python fontTools is not installed; skipped optional legacy Waybar icon font"
+  installed_font_message="Warning: Python fontTools is not installed; skipped optional legacy/pre-Quattro Waybar icon font"
 else
-  installed_font_message="Warning: $font_source not found; Waybar may render the Chromecast glyph as a missing-glyph box"
+  installed_font_message="Warning: $font_source not found; legacy Waybar may render the Chromecast glyph as a missing-glyph box"
 fi
 
 cat <<EOF
-Installed chromium-castctl -> $target
+Installed legacy chromium-castctl CLI -> $target
 $installed_font_message
+
+This script is for direct CLI usage and legacy/pre-Quattro Waybar setups.
+Omarchy Quattro plugin installs use:
+  omarchy plugin add https://github.com/HackXIt/omarchy-chromecast --enable
 
 Make sure ~/.local/bin is on PATH, then run:
   chromium-castctl doctor
