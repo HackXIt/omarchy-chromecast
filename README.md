@@ -90,6 +90,12 @@ The plugin uses the bundled helper at `bin/chromium-castctl` by default. Overrid
 { "id": "hackxit.chromecast", "castctl": "/path/to/chromium-castctl" }
 ```
 
+Remove the plugin with:
+
+```bash
+omarchy plugin remove hackxit.chromecast
+```
+
 ## Optional legacy/pre-Quattro CLI install
 
 This path is only for direct CLI usage or older/pre-Quattro Omarchy setups that still use Waybar integration. It is not needed for the Quattro plugin above.
