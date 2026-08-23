@@ -110,7 +110,7 @@ command -v chromium-castctl
 chromium-castctl doctor
 ```
 
-`install.sh` symlinks `bin/chromium-castctl` to `~/.local/bin/chromium-castctl` and optionally installs a Waybar icon font for legacy/pre-Quattro Waybar integration. It does not install or enable the Omarchy Quattro plugin.
+`install.sh` symlinks `bin/chromium-castctl` to `~/.local/bin/chromium-castctl` and optionally installs a Waybar icon font for legacy/pre-Quattro Waybar integration. For safety, it refuses symlinked destination directories and will not replace a non-symlink helper at that path. It does not install or enable the Omarchy Quattro plugin.
 
 ## Usage
 
@@ -320,9 +320,10 @@ Run tests with Node's built-in test runner and validate the plugin manifest:
 
 ```bash
 ./scripts/validate-plugin.sh .
+./scripts/check-actions-pinned.sh
 node --test
-node --check bin/chromium-castctl
-bash -n install.sh scripts/validate-plugin.sh
+node --check bin/chromium-castctl test/fixtures/dummy-chromium-cast
+bash -n install.sh scripts/validate-plugin.sh scripts/check-actions-pinned.sh
 ```
 
 The GitHub Actions workflow runs these checks on pushes and pull requests. The Node test suite starts a dependency-free dummy Chromium/CDP Cast backend and exercises the same helper workflows the Quickshell plugin uses: target discovery, start, active status, stop, and idle status.
