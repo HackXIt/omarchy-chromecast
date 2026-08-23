@@ -147,7 +147,7 @@ Lifecycle notes:
 
 - `status` and `status --waybar` never launch Chromium.
 - `sinks` launches Chromium with a fresh isolated profile for discovery, then closes it again if no cast is active.
-- `pick` uses live Avahi/mDNS discovery first so Walker can open quickly. When Avahi finds targets, it starts the headless Chromium control browser in the background while Walker is open, then reuses or waits for that browser after a sink is selected. If Avahi finds no targets, it falls back to Chromium discovery.
+- `pick` uses live Avahi/mDNS discovery first so Walker can open quickly. When Avahi finds targets, it waits until a unique target is selected before starting the headless Chromium control browser. If Avahi finds no targets, it falls back to Chromium discovery.
 - `waybar-toggle` marks the module busy, signals Waybar, then runs toggle work in the background so the bar can repaint immediately.
 - `stop` attempts to stop every active cast and proceeds with closing the isolated Chromium control browser even when a Cast stop request fails.
 
