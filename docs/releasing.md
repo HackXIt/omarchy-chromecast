@@ -21,16 +21,8 @@ This repository uses tag-driven GitHub Releases for public plugin releases. The 
    ./scripts/release-notes.sh vX.Y.Z
    ```
 
-5. Run the normal repository validation:
-
-   ```bash
-   ./scripts/validate-plugin.sh .
-   ./scripts/check-actions-pinned.sh
-   ./scripts/release-notes.sh "v$(jq -r '.version' manifest.json)" >/dev/null
-   node --test
-   node --check bin/chromium-castctl test/fixtures/dummy-chromium-cast
-   bash -n install.sh scripts/validate-plugin.sh scripts/check-actions-pinned.sh scripts/release-notes.sh
-   ```
+5. Run the normal repository validation listed in the README's
+   [Development](../README.md#development) section.
 
 6. Open a small release-prep PR and wait for CI/review.
 
