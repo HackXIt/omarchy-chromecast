@@ -215,13 +215,32 @@ function processUsesProfile(identity, paths) {
   return cmdlineArgs(identity).includes(`--user-data-dir=${paths.profileDir}`);
 }
 
-function processIsProfileBrowser(identity, paths) {
-  const args = cmdlineArgs(identity);
-  return args.includes(`--user-data-dir=${paths.profileDir}`)
-    && !args.some((arg) => arg.startsWith('--type='));
+function processExecutable(pid) {
+  try {
+    return fs.realpathSync(`/proc/${pid}/exe`);
+  } catch {
+    return null;
+  }
 }
 
-function findProfileBrowserProcesses(paths) {
+function configuredBrowserExecutable(env = process.env) {
+  const executable = findExecutable(chromiumCommand(env), env);
+  if (!executable) return null;
+  try {
+    return fs.realpathSync(executable);
+  } catch {
+    return null;
+  }
+}
+
+function processIsProfileBrowser(identity, paths, env = process.env) {
+  const args = cmdlineArgs(identity);
+  return args.includes(`--user-data-dir=${paths.profileDir}`)
+    && !args.some((arg) => arg.startsWith('--type='))
+    && processExecutable(identity.pid) === configuredBrowserExecutable(env);
+}
+
+function findProfileBrowserProcesses(paths, env = process.env) {
   let entries;
   try {
     entries = fs.readdirSync('/proc', { withFileTypes: true });
@@ -236,7 +255,7 @@ function findProfileBrowserProcesses(paths) {
     if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
 
     const identity = readProcessIdentity(pid);
-    if (!identity || !identity.startTime || !processIsProfileBrowser(identity, paths)) continue;
+    if (!identity || !identity.startTime || !processIsProfileBrowser(identity, paths, env)) continue;
     processes.push({
       pid,
       processGroupId: Number.isInteger(identity.processGroupId) ? identity.processGroupId : null,
@@ -246,16 +265,16 @@ function findProfileBrowserProcesses(paths) {
   return processes;
 }
 
-function profileBrowserStillMatches(candidate, paths) {
+function profileBrowserStillMatches(candidate, paths, env = process.env) {
   if (!candidate || !Number.isInteger(candidate.pid) || candidate.pid <= 0) return false;
   const identity = readProcessIdentity(candidate.pid);
   return Boolean(identity
     && identity.startTime === String(candidate.processStartTime)
-    && processIsProfileBrowser(identity, paths));
+    && processIsProfileBrowser(identity, paths, env));
 }
 
-function signalProfileBrowserProcess(candidate, paths, signal) {
-  if (!profileBrowserStillMatches(candidate, paths)) return false;
+function signalProfileBrowserProcess(candidate, paths, env, signal) {
+  if (!profileBrowserStillMatches(candidate, paths, env)) return false;
   if (candidate.processGroupId === candidate.pid) {
     try {
       process.kill(-candidate.processGroupId, signal);
@@ -807,19 +826,19 @@ async function waitForPidExit(pid, timeoutMs) {
   return !isPidAlive(pid);
 }
 
-async function cleanupProfileBrowserProcesses(paths, candidates = findProfileBrowserProcesses(paths)) {
+async function cleanupProfileBrowserProcesses(paths, env = process.env, candidates = findProfileBrowserProcesses(paths, env)) {
   const unique = [...new Map(candidates.map((candidate) => [candidate.pid, candidate])).values()]
-    .filter((candidate) => profileBrowserStillMatches(candidate, paths));
+    .filter((candidate) => profileBrowserStillMatches(candidate, paths, env));
   if (unique.length === 0) return 0;
 
-  for (const candidate of unique) signalProfileBrowserProcess(candidate, paths, 'SIGTERM');
+  for (const candidate of unique) signalProfileBrowserProcess(candidate, paths, env, 'SIGTERM');
   await Promise.all(unique.map((candidate) => waitForPidExit(candidate.pid, 1500)));
 
-  const remaining = unique.filter((candidate) => isPidAlive(candidate.pid) && profileBrowserStillMatches(candidate, paths));
-  for (const candidate of remaining) signalProfileBrowserProcess(candidate, paths, 'SIGKILL');
+  const remaining = unique.filter((candidate) => isPidAlive(candidate.pid) && profileBrowserStillMatches(candidate, paths, env));
+  for (const candidate of remaining) signalProfileBrowserProcess(candidate, paths, env, 'SIGKILL');
   await Promise.all(remaining.map((candidate) => waitForPidExit(candidate.pid, 500)));
 
-  const stuck = unique.filter((candidate) => isPidAlive(candidate.pid) && profileBrowserStillMatches(candidate, paths));
+  const stuck = unique.filter((candidate) => isPidAlive(candidate.pid) && profileBrowserStillMatches(candidate, paths, env));
   if (stuck.length > 0) {
     throw new CliError(`Failed to stop stale chromium-castctl browser process(es): ${stuck.map((candidate) => `pid=${candidate.pid}`).join(', ')}`, 1);
   }
@@ -838,9 +857,9 @@ async function discardStateBrowser(paths, state) {
   clearState(paths);
 }
 
-async function shutdownBrowser(paths, browser, client) {
+async function shutdownBrowser(paths, browser, client, env = process.env) {
   const state = browser || readState(paths);
-  if (!state) return (await cleanupProfileBrowserProcesses(paths)) > 0;
+  if (!state) return (await cleanupProfileBrowserProcesses(paths, env)) > 0;
   if (state.pid === process.pid) {
     clearState(paths);
     return true;
@@ -941,12 +960,12 @@ async function getReusableBrowser(paths, options = {}) {
   const env = options.env || process.env;
   const state = readState(paths);
   if (!state) {
-    await cleanupProfileBrowserProcesses(paths);
+    await cleanupProfileBrowserProcesses(paths, env);
     return null;
   }
   if (!stateMatchesLaunchConfig(state, paths, env)) {
     await discardStateBrowser(paths, state);
-    await cleanupProfileBrowserProcesses(paths);
+    await cleanupProfileBrowserProcesses(paths, env);
     return null;
   }
   if (await stateHasUsableCdp(state, { ...options, paths })) return state;
@@ -964,7 +983,7 @@ async function getReusableBrowser(paths, options = {}) {
   }
 
   await discardStateBrowser(paths, state);
-  await cleanupProfileBrowserProcesses(paths);
+  await cleanupProfileBrowserProcesses(paths, env);
   return null;
 }
 
@@ -1865,7 +1884,7 @@ async function collectDoctorResults(paths, options = {}) {
   }
 
   const state = readState(paths);
-  const profileBrowsers = findProfileBrowserProcesses(paths);
+  const profileBrowsers = findProfileBrowserProcesses(paths, env);
   if (state) {
     const usable = await stateHasUsableCdp(state, { ...options, paths, timeoutMs: 1000 }).catch(() => false);
     addDoctorResult(results, usable ? 'ok' : 'warn', 'existing chromium-castctl browser', usable ? `pid=${state.pid} port=${state.port}` : 'stale state will be replaced on next start');

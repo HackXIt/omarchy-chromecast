@@ -522,11 +522,49 @@ test('status cleanup terminates same-profile controller processes when state is 
     assert.equal(mod.readState(paths), null);
     assert.equal(mod.isPidAlive(child.pid), true);
 
-    const status = await mod.getStatus(paths, { timeoutMs: 1, waitMs: 1 });
+    const status = await mod.getStatus(paths, {
+      env: { ...process.env, CHROMIUM_CASTCTL_CHROMIUM: process.execPath },
+      timeoutMs: 1,
+      waitMs: 1,
+    });
 
     assert.equal(status.browser, false);
     assert.equal(await waitForChildExit(child), true);
     assert.equal(mod.readState(paths), null);
+  } finally {
+    if (mod.isPidAlive(child.pid)) {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        process.kill(child.pid, 'SIGKILL');
+      }
+    }
+  }
+});
+
+test('orphan cleanup does not signal another executable spoofing the profile argument', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const child = childProcess.spawn(process.execPath, [
+    '-e',
+    'setInterval(() => {}, 1000)',
+    '--',
+    `--user-data-dir=${paths.profileDir}`,
+  ], {
+    detached: true,
+    stdio: 'ignore',
+  });
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const status = await mod.getStatus(paths, {
+      env: { ...process.env, CHROMIUM_CASTCTL_CHROMIUM: '/bin/sleep' },
+      timeoutMs: 1,
+      waitMs: 1,
+    });
+
+    assert.equal(status.browser, false);
+    assert.equal(await waitForChildExit(child, 300), false);
+    assert.equal(mod.isPidAlive(child.pid), true);
   } finally {
     if (mod.isPidAlive(child.pid)) {
       try {
