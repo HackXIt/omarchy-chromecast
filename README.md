@@ -6,7 +6,7 @@ This repository is primarily an **Omarchy Quattro** shell plugin for desktop cas
 
 On Omarchy Quattro, the plugin provides a native Quickshell bar widget and popup UI for choosing targets, starting/stopping desktop mirroring, and refreshing targets. Diagnostics open in an Omarchy floating terminal so the full command output stays readable and waits for the user before closing. The bundled `chromium-castctl` helper controls Chromium's built-in Google Cast backend over the Chrome DevTools Protocol (CDP).
 
-Chromium performs the actual casting. This project only launches an isolated Chromium control instance and sends CDP Cast commands.
+Chromium performs the actual casting. This project only launches an isolated Chromium control instance and sends CDP Cast commands. The CDP endpoint is scoped to the local loopback interface and private per-user state, but Chromium does not provide per-Unix-account authentication for that listener; use this plugin in a normal single-user desktop session, not as a cross-user isolation boundary on a shared host.
 
 This project was vibe-coded from the practical need to have a simple "cast this desktop" button in Omarchy without building a full media-router implementation. The tradeoff is a slower UX: discovery, the isolated Chromium controller, CDP commands, and the Wayland portal prompt can take a moment. In exchange, the implementation stays small and relies on Chromium's already-existing casting capabilities instead of reimplementing them.
 
@@ -29,8 +29,10 @@ This project was vibe-coded from the practical need to have a simple "cast this 
 
 - Uses a fresh isolated Chromium profile at `~/.local/share/chromium-castctl/chromium-profile/` for each new control-browser launch.
 - Does **not** modify the user's normal Chromium profile or Chromium installation.
-- Binds DevTools to `127.0.0.1` only.
+- Binds DevTools to `127.0.0.1` only, stores its state under private XDG directories, and validates discovered CDP WebSocket URLs before connecting.
 - Launches the isolated Chromium control instance headless by default; no Chromium window should appear.
+- Rejects ambiguous duplicate receiver names instead of silently choosing the first matching device.
+- Treats receiver names as untrusted display data: structured JSON is used for the Quickshell target list, control characters are rejected or neutralized, and UI surfaces render names as plain text.
 - Does **not** bypass Wayland/Hyprland portal confirmation.
 - Does **not** edit Waybar config automatically.
 - Omarchy plugin mode does **not** require Walker; target selection happens in the Quickshell popup.
@@ -84,7 +86,7 @@ omarchy-shell shell rescanPlugins
 omarchy restart shell
 ```
 
-The plugin uses the bundled helper at `bin/chromium-castctl` by default. Override the helper path only if you have a separate development checkout:
+The plugin uses the bundled helper at `bin/chromium-castctl` by default. Override the helper path only if you have a separate development checkout that you trust as executable code. The plugin accepts only absolute override paths without control characters; unsafe values fall back to the bundled helper.
 
 ```json
 { "id": "hackxit.chromecast", "castctl": "/path/to/chromium-castctl" }

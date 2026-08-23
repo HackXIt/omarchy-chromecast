@@ -5,13 +5,29 @@ const crypto = require('node:crypto');
 const http = require('node:http');
 
 const sinkName = process.env.CHROMIUM_CASTCTL_DUMMY_SINK_NAME || 'Dummy Chromecast';
-const port = Number.parseInt(argValue('--remote-debugging-port=') || '', 10);
+let port = Number.parseInt(argValue('--remote-debugging-port=') || '', 10);
 const address = argValue('--remote-debugging-address=') || '127.0.0.1';
+const userDataDir = argValue('--user-data-dir=');
+const hostileWebSocketUrl = process.env.CHROMIUM_CASTCTL_DUMMY_HOSTILE_WS_URL || '';
+const failStop = process.env.CHROMIUM_CASTCTL_DUMMY_FAIL_STOP === '1';
+const malformedJson = process.env.CHROMIUM_CASTCTL_DUMMY_MALFORMED_JSON === '1';
+const oversizedWsBytes = Number.parseInt(process.env.CHROMIUM_CASTCTL_DUMMY_OVERSIZED_WS_BYTES || '', 10);
+const floodCount = Number.parseInt(process.env.CHROMIUM_CASTCTL_DUMMY_FLOOD_SINKS || '', 10);
 let active = false;
 
-if (!Number.isInteger(port) || port <= 0) {
+if (!Number.isInteger(port) || port < 0) {
   process.stderr.write('dummy-chromium-cast: missing --remote-debugging-port\n');
   process.exit(2);
+}
+
+function dummySinkNames() {
+  if (!process.env.CHROMIUM_CASTCTL_DUMMY_SINKS_JSON) return [sinkName];
+  try {
+    const parsed = JSON.parse(process.env.CHROMIUM_CASTCTL_DUMMY_SINKS_JSON);
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed.map(String) : [sinkName];
+  } catch {
+    return [sinkName];
+  }
 }
 
 function argValue(prefix) {
@@ -25,7 +41,7 @@ function pageTarget() {
     type: 'page',
     title: 'Dummy Chromecast Target',
     url: 'about:blank',
-    webSocketDebuggerUrl: `ws://${address}:${port}/devtools/page/dummy-page`,
+    webSocketDebuggerUrl: hostileWebSocketUrl || `ws://${address}:${port}/devtools/page/dummy-page`,
   };
 }
 
@@ -39,7 +55,10 @@ function writeJson(response, value) {
 }
 
 function sinks() {
-  return [{ name: sinkName, session: active ? { id: 'dummy-session' } : null }];
+  return dummySinkNames().map((name, index) => ({
+    name,
+    session: active ? { id: `dummy-session-${index}` } : null,
+  }));
 }
 
 function sendFrame(socket, message) {
@@ -114,13 +133,28 @@ function handleCdpMessage(socket, raw) {
   } else if (method === 'Browser.setWindowBounds') {
     sendFrame(socket, { id, result: {} });
   } else if (method === 'Cast.enable') {
+    if (malformedJson) {
+      socket.write(Buffer.from([0x81, 0x05, 0x7b, 0x6e, 0x6f, 0x70, 0x65]));
+      return;
+    }
+    if (Number.isInteger(oversizedWsBytes) && oversizedWsBytes > 0) {
+      sendFrame(socket, { id, result: 'x'.repeat(oversizedWsBytes) });
+      return;
+    }
     sendFrame(socket, { id, result: {} });
-    sendFrame(socket, { method: 'Cast.sinksUpdated', params: { sinks: sinks() } });
+    const repeats = Number.isInteger(floodCount) && floodCount > 0 ? floodCount : 1;
+    for (let index = 0; index < repeats; index += 1) {
+      sendFrame(socket, { method: 'Cast.sinksUpdated', params: { sinks: sinks() } });
+    }
   } else if (method === 'Cast.startDesktopMirroring') {
     active = true;
     sendFrame(socket, { id, result: {} });
     sendFrame(socket, { method: 'Cast.sinksUpdated', params: { sinks: sinks() } });
   } else if (method === 'Cast.stopCasting') {
+    if (failStop) {
+      sendFrame(socket, { id, error: { message: 'dummy stop failure' } });
+      return;
+    }
     active = false;
     sendFrame(socket, { id, result: {} });
     sendFrame(socket, { method: 'Cast.sinksUpdated', params: { sinks: sinks() } });
@@ -181,7 +215,14 @@ server.on('upgrade', (request, socket) => {
   });
 });
 
-server.listen(port, address);
+server.listen(port, address, () => {
+  port = server.address().port;
+  if (userDataDir) {
+    const fs = require('node:fs');
+    fs.mkdirSync(userDataDir, { recursive: true });
+    fs.writeFileSync(`${userDataDir}/DevToolsActivePort`, `${port}\n/devtools/browser/dummy\n`, 'utf8');
+  }
+});
 
 process.on('SIGTERM', () => process.exit(0));
 process.on('SIGINT', () => process.exit(0));

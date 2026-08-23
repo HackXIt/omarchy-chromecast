@@ -42,6 +42,25 @@ function jsonResponse(value) {
   };
 }
 
+function jsonTextResponse(value) {
+  const body = JSON.stringify(value);
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (name) => (String(name).toLowerCase() === 'content-length' ? String(Buffer.byteLength(body)) : null) },
+    async text() {
+      return body;
+    },
+    async json() {
+      return value;
+    },
+  };
+}
+
+function cdpPageTarget(port = 9222) {
+  return { type: 'page', id: 'page-1', webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/page-1` };
+}
+
 class PrototypeDataEvent {
   constructor(data) {
     this._data = data;
@@ -150,19 +169,221 @@ class FakeWebSocket {
   }
 }
 
-test('XDG paths use isolated chromium-castctl locations', () => {
+
+class StopFailingWebSocket {
+  static instances = [];
+
+  constructor(url) {
+    this.url = url;
+    this.readyState = 0;
+    this.listeners = new Map();
+    this.sent = [];
+    StopFailingWebSocket.instances.push(this);
+    setImmediate(() => {
+      this.readyState = 1;
+      this.emit('open', {});
+    });
+  }
+
+  addEventListener(event, handler) {
+    const handlers = this.listeners.get(event) || [];
+    handlers.push(handler);
+    this.listeners.set(event, handlers);
+  }
+
+  removeEventListener(event, handler) {
+    const handlers = this.listeners.get(event) || [];
+    this.listeners.set(event, handlers.filter((candidate) => candidate !== handler));
+  }
+
+  emit(event, payload) {
+    for (const handler of this.listeners.get(event) || []) handler(payload);
+  }
+
+  send(raw) {
+    const message = JSON.parse(raw);
+    this.sent.push(message);
+    setImmediate(() => {
+      if (message.method === 'Cast.enable') {
+        this.emit('message', new PrototypeDataEvent(JSON.stringify({ id: message.id, result: {} })));
+        this.emit('message', new PrototypeDataEvent(JSON.stringify({
+          method: 'Cast.sinksUpdated',
+          params: { sinks: [
+            { name: 'Living Room', session: { id: 'one' } },
+            { name: 'Bedroom', session: { id: 'two' } },
+          ] },
+        })));
+      } else if (message.method === 'Cast.stopCasting' && message.params.sinkName === 'Living Room') {
+        this.emit('message', new PrototypeDataEvent(JSON.stringify({ id: message.id, error: { message: 'receiver refused stop' } })));
+      } else {
+        this.emit('message', new PrototypeDataEvent(JSON.stringify({ id: message.id, result: {} })));
+      }
+    });
+  }
+
+  close() {
+    this.readyState = 3;
+    this.emit('close', {});
+  }
+}
+
+class ControlNameWebSocket {
+  static instances = [];
+
+  constructor(url) {
+    this.url = url;
+    this.readyState = 0;
+    this.listeners = new Map();
+    this.sent = [];
+    ControlNameWebSocket.instances.push(this);
+    setImmediate(() => {
+      this.readyState = 1;
+      this.emit('open', {});
+    });
+  }
+
+  addEventListener(event, handler) {
+    const handlers = this.listeners.get(event) || [];
+    handlers.push(handler);
+    this.listeners.set(event, handlers);
+  }
+
+  removeEventListener(event, handler) {
+    const handlers = this.listeners.get(event) || [];
+    this.listeners.set(event, handlers.filter((candidate) => candidate !== handler));
+  }
+
+  emit(event, payload) {
+    for (const handler of this.listeners.get(event) || []) handler(payload);
+  }
+
+  send(raw) {
+    const message = JSON.parse(raw);
+    this.sent.push(message);
+    setImmediate(() => {
+      this.emit('message', new PrototypeDataEvent(JSON.stringify({ id: message.id, result: {} })));
+      if (message.method === 'Cast.enable') {
+        this.emit('message', new PrototypeDataEvent(JSON.stringify({
+          method: 'Cast.sinksUpdated',
+          params: { sinks: [
+            { name: 'Good\nBad', session: null },
+            { name: 'Esc\u001bBad', session: null },
+            { name: 'Bidi\u202eBad', session: null },
+            { name: '<b>Wohnzimmer</b> & "TV"', session: null },
+          ] },
+        })));
+      }
+    });
+  }
+
+  close() {
+    this.readyState = 3;
+    this.emit('close', {});
+  }
+}
+
+
+class DuplicateNameWebSocket {
+  constructor(url) {
+    this.url = url;
+    this.readyState = 0;
+    this.listeners = new Map();
+    setImmediate(() => {
+      this.readyState = 1;
+      this.emit('open', {});
+    });
+  }
+
+  addEventListener(event, handler) {
+    const handlers = this.listeners.get(event) || [];
+    handlers.push(handler);
+    this.listeners.set(event, handlers);
+  }
+
+  removeEventListener(event, handler) {
+    const handlers = this.listeners.get(event) || [];
+    this.listeners.set(event, handlers.filter((candidate) => candidate !== handler));
+  }
+
+  emit(event, payload) {
+    for (const handler of this.listeners.get(event) || []) handler(payload);
+  }
+
+  send(raw) {
+    const message = JSON.parse(raw);
+    setImmediate(() => {
+      this.emit('message', new PrototypeDataEvent(JSON.stringify({ id: message.id, result: {} })));
+      if (message.method === 'Cast.enable') {
+        this.emit('message', new PrototypeDataEvent(JSON.stringify({
+          method: 'Cast.sinksUpdated',
+          params: { sinks: [
+            { name: 'Trusted TV', id: 'a', session: null },
+            { name: 'Trusted TV', id: 'b', session: null },
+          ] },
+        })));
+      }
+    });
+  }
+
+  close() {
+    this.readyState = 3;
+    this.emit('close', {});
+  }
+}
+
+class OversizedMessageWebSocket {
+  constructor(url) {
+    this.url = url;
+    this.readyState = 0;
+    this.listeners = new Map();
+    setImmediate(() => {
+      this.readyState = 1;
+      this.emit('open', {});
+    });
+  }
+
+  addEventListener(event, handler) {
+    const handlers = this.listeners.get(event) || [];
+    handlers.push(handler);
+    this.listeners.set(event, handlers);
+  }
+
+  removeEventListener(event, handler) {
+    const handlers = this.listeners.get(event) || [];
+    this.listeners.set(event, handlers.filter((candidate) => candidate !== handler));
+  }
+
+  emit(event, payload) {
+    for (const handler of this.listeners.get(event) || []) handler(payload);
+  }
+
+  send() {
+    setImmediate(() => {
+      this.emit('message', new PrototypeDataEvent(`${'{'}"id":1,"result":"${'x'.repeat(2 * 1024 * 1024)}"${'}'}`));
+    });
+  }
+
+  close() {
+    this.readyState = 3;
+    this.emit('close', {});
+  }
+}
+
+test('XDG paths use isolated chromium-castctl locations and ignore relative XDG roots', () => {
   const home = tempHome();
-  const paths = mod.resolvePaths({ HOME: home });
+  const paths = mod.resolvePaths({ HOME: home, XDG_DATA_HOME: 'relative-data', XDG_STATE_HOME: 'relative-state', XDG_CACHE_HOME: 'relative-cache' });
   assert.equal(paths.profileDir, path.join(home, '.local', 'share', 'chromium-castctl', 'chromium-profile'));
   assert.equal(paths.stateFile, path.join(home, '.local', 'state', 'chromium-castctl', 'state.json'));
   assert.equal(paths.logFile, path.join(home, '.cache', 'chromium-castctl', 'chromium.log'));
 });
 
-test('state read/write round-trips JSON state', () => {
+test('state read/write round-trips JSON state with private file permissions', () => {
   const paths = mod.resolvePaths({ HOME: tempHome() });
   const state = { pid: 1234, port: 4567, remoteDebuggingAddress: '127.0.0.1', lastActiveSink: 'Wohnzimmer' };
   mod.writeState(paths, state);
   assert.deepEqual(mod.readState(paths), state);
+  assert.equal(fs.statSync(paths.stateFile).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.dirname(paths.stateFile)).mode & 0o777, 0o700);
 });
 
 test('executable lookup respects an explicitly empty PATH', () => {
@@ -196,7 +417,7 @@ test('browser launch honors the browser startup timeout separately from the CDP 
   const home = tempHome();
   const fakeBin = path.join(home, 'bin');
   fs.mkdirSync(fakeBin, { recursive: true });
-  writeExecutable(path.join(fakeBin, 'chromium'), '#!/bin/sh\n/bin/sleep 1\n');
+  writeExecutable(path.join(fakeBin, 'chromium'), '#!/bin/sh\nprofile=\nfor arg in "$@"; do case "$arg" in --user-data-dir=*) profile=${arg#--user-data-dir=};; esac; done\nmkdir -p "$profile"\nprintf "9333\\n/devtools/browser/fake\\n" > "$profile/DevToolsActivePort"\n/bin/sleep 1\n');
 
   const paths = mod.resolvePaths({ HOME: home });
   let listCalls = 0;
@@ -204,7 +425,7 @@ test('browser launch honors the browser startup timeout separately from the CDP 
     if (url.endsWith('/json/list')) {
       listCalls += 1;
       if (listCalls === 1) throw new Error('CDP not ready yet');
-      return jsonResponse([{ type: 'page', id: 'page-1', webSocketDebuggerUrl: 'ws://page' }]);
+      return jsonResponse([cdpPageTarget(9333)]);
     }
     if (url.includes('/json/new?')) return jsonResponse({});
     throw new Error(`Unexpected URL: ${url}`);
@@ -244,7 +465,7 @@ test('status --waybar renders idle JSON without launching Chromium', async () =>
   });
 });
 
-test('status cleanup terminates stale same-profile browser state', async () => {
+test('status cleanup clears unverified stale same-profile browser state without signaling the PID', async () => {
   const paths = mod.resolvePaths({ HOME: tempHome() });
   const child = childProcess.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
     detached: true,
@@ -260,13 +481,15 @@ test('status cleanup terminates stale same-profile browser state', async () => {
       launchMode: 'headless',
       profileVersion: 4,
       castAudio: false,
+      processStartTime: 'definitely-not-the-live-process-start-time',
+      processGroupId: child.pid,
     });
     const fetchImpl = async () => { throw new Error('CDP is unavailable'); };
 
     const status = await mod.getStatus(paths, { fetchImpl, timeoutMs: 1, waitMs: 1 });
 
     assert.equal(status.browser, false);
-    assert.equal(await waitForChildExit(child), true);
+    assert.equal(await waitForChildExit(child, 300), false);
     assert.equal(mod.readState(paths), null);
   } finally {
     if (mod.isPidAlive(child.pid)) {
@@ -308,11 +531,11 @@ test('pick starts the only Avahi sink directly without Walker', async () => {
   const fakeBin = path.join(home, 'bin');
   fs.mkdirSync(fakeBin, { recursive: true });
   writeExecutable(path.join(fakeBin, 'avahi-browse'), '#!/bin/sh\nprintf \'%s\\n\' \'=;wlan0;IPv4;Chromecast;_googlecast._tcp;local;host;10.0.0.2;8009;"id=1" "fn=Wohnzimmer"\'\n');
-  writeExecutable(path.join(fakeBin, 'chromium'), '#!/bin/sh\n/bin/sleep 1\n');
+  writeExecutable(path.join(fakeBin, 'chromium'), '#!/bin/sh\nprofile=\nfor arg in "$@"; do case "$arg" in --user-data-dir=*) profile=${arg#--user-data-dir=};; esac; done\nmkdir -p "$profile"\nprintf "9333\\n/devtools/browser/fake\\n" > "$profile/DevToolsActivePort"\n/bin/sleep 1\n');
 
   const paths = mod.resolvePaths({ HOME: home });
   const fetchImpl = async (url) => {
-    if (url.endsWith('/json/list')) return jsonResponse([{ type: 'page', id: 'page-1', webSocketDebuggerUrl: 'ws://page' }]);
+    if (url.endsWith('/json/list')) return jsonResponse([cdpPageTarget(9333)]);
     if (url.includes('/json/new?')) return jsonResponse({});
     throw new Error(`Unexpected URL: ${url}`);
   };
@@ -407,11 +630,11 @@ test('getPageTarget creates an about:blank page when no page target exists', asy
     calls.push({ url, method: options.method });
     if (url.endsWith('/json/list') && calls.length === 1) return jsonResponse([{ type: 'browser' }]);
     if (url.includes('/json/new?')) return jsonResponse({});
-    return jsonResponse([{ type: 'page', webSocketDebuggerUrl: 'ws://page' }]);
+    return jsonResponse([cdpPageTarget(9222)]);
   };
 
   const target = await mod.getPageTarget(9222, { fetchImpl });
-  assert.equal(target.webSocketDebuggerUrl, 'ws://page');
+  assert.equal(target.webSocketDebuggerUrl, 'ws://127.0.0.1:9222/devtools/page/page-1');
   assert.equal(calls[1].method, 'PUT');
 });
 
@@ -483,8 +706,10 @@ test('CLI formats async command errors without a stack trace', async () => {
     launchMode: 'headless',
     profileVersion: 4,
     castAudio: false,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    processGroupId: process.pid,
   });
-  const fetchImpl = async () => jsonResponse([{ type: 'page', id: 'page-1', webSocketDebuggerUrl: 'ws://page' }]);
+  const fetchImpl = async () => jsonResponse([cdpPageTarget(9222)]);
   let stdout = '';
   let stderr = '';
 
@@ -543,4 +768,162 @@ test('CLI status --waybar is valid idle JSON with an empty temp HOME', () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).class, 'idle');
+});
+
+
+test('sink matching rejects duplicate friendly names instead of choosing the first', () => {
+  assert.throws(
+    () => mod.matchSink([{ name: 'Trusted TV' }, { name: 'Trusted TV' }], 'Trusted TV'),
+    /Ambiguous Chromecast target name: Trusted TV/,
+  );
+});
+
+test('getPageTarget rejects hostile CDP WebSocket URLs', async () => {
+  const cases = [
+    'ws://localhost:9222/devtools/page/page-1',
+    'ws://127.0.0.1:9223/devtools/page/page-1',
+    'wss://127.0.0.1:9222/devtools/page/page-1',
+    'ws://user:pass@127.0.0.1:9222/devtools/page/page-1',
+    'ws://[::1]:9222/devtools/page/page-1',
+  ];
+
+  for (const webSocketDebuggerUrl of cases) {
+    await assert.rejects(
+      () => mod.getPageTarget(9222, { fetchImpl: async () => jsonResponse([{ type: 'page', webSocketDebuggerUrl }]) }),
+      /invalid CDP WebSocket URL/i,
+      webSocketDebuggerUrl,
+    );
+  }
+});
+
+test('CDP client rejects oversized WebSocket messages deterministically', async () => {
+  const client = await mod.CdpClient.connect('ws://127.0.0.1:9222/devtools/page/page-1', {
+    WebSocketImpl: OversizedMessageWebSocket,
+    timeoutMs: 1000,
+  });
+
+  await assert.rejects(
+    () => client.send('Cast.enable', {}, 1000),
+    /CDP WebSocket message exceeds/i,
+  );
+  client.close();
+});
+
+test('sinks --json returns structured safe records and rejects record-boundary controls', async () => {
+  ControlNameWebSocket.instances = [];
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  mod.writeState(paths, {
+    pid: process.pid,
+    port: 9222,
+    remoteDebuggingAddress: '127.0.0.1',
+    userDataDir: paths.profileDir,
+    launchMode: 'headless',
+    profileVersion: 4,
+    castAudio: false,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    processGroupId: process.pid,
+  });
+  const fetchImpl = async () => jsonResponse([cdpPageTarget(9222)]);
+  let stdout = '';
+  let stderr = '';
+
+  const code = await mod.run(
+    ['sinks', '--json'],
+    {
+      stdout: { write: (chunk) => { stdout += chunk; } },
+      stderr: { write: (chunk) => { stderr += chunk; } },
+    },
+    { ...process.env, HOME: paths.home, CHROMIUM_CASTCTL_SINK_WAIT_MS: '1' },
+    { paths, fetchImpl, WebSocketImpl: ControlNameWebSocket },
+  );
+
+  assert.equal(code, 0, stderr);
+  const data = JSON.parse(stdout);
+  assert.deepEqual(data.sinks, [
+    {
+      name: '<b>Wohnzimmer</b> & "TV"',
+      displayName: '<b>Wohnzimmer</b> & "TV"',
+      startable: true,
+      ambiguous: false,
+      duplicateCount: 1,
+    },
+  ]);
+});
+
+test('stop tries every active sink and clears local controller state after stop errors', async () => {
+  StopFailingWebSocket.instances = [];
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  mod.writeState(paths, {
+    pid: process.pid,
+    port: 9222,
+    remoteDebuggingAddress: '127.0.0.1',
+    userDataDir: paths.profileDir,
+    launchMode: 'headless',
+    profileVersion: 4,
+    castAudio: false,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    processGroupId: process.pid,
+  });
+  const fetchImpl = async () => jsonResponse([cdpPageTarget(9222)]);
+  let stdout = '';
+  let stderr = '';
+
+  const code = await mod.run(
+    ['stop'],
+    {
+      stdout: { write: (chunk) => { stdout += chunk; } },
+      stderr: { write: (chunk) => { stderr += chunk; } },
+    },
+    { ...process.env, HOME: paths.home, CHROMIUM_CASTCTL_SINK_WAIT_MS: '1' },
+    { paths, fetchImpl, WebSocketImpl: StopFailingWebSocket },
+  );
+
+  const stopTargets = StopFailingWebSocket.instances[0].sent
+    .filter((message) => message.method === 'Cast.stopCasting')
+    .map((message) => message.params.sinkName);
+  assert.equal(code, 1);
+  assert.deepEqual(stopTargets, ['Living Room', 'Bedroom']);
+  assert.match(stderr, /Failed to stop casting for Living Room; local Chromium cleanup was attempted/);
+  assert.equal(stdout, '');
+  assert.equal(mod.readState(paths), null);
+});
+
+
+test('sinks --json marks duplicate friendly names as ambiguous and not startable', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  mod.writeState(paths, {
+    pid: process.pid,
+    port: 9222,
+    remoteDebuggingAddress: '127.0.0.1',
+    userDataDir: paths.profileDir,
+    launchMode: 'headless',
+    profileVersion: 4,
+    castAudio: false,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    processGroupId: process.pid,
+  });
+  const fetchImpl = async () => jsonResponse([cdpPageTarget(9222)]);
+  let stdout = '';
+  let stderr = '';
+
+  const code = await mod.run(
+    ['sinks', '--json'],
+    {
+      stdout: { write: (chunk) => { stdout += chunk; } },
+      stderr: { write: (chunk) => { stderr += chunk; } },
+    },
+    { ...process.env, HOME: paths.home, CHROMIUM_CASTCTL_SINK_WAIT_MS: '1' },
+    { paths, fetchImpl, WebSocketImpl: DuplicateNameWebSocket },
+  );
+
+  assert.equal(code, 0, stderr);
+  assert.deepEqual(JSON.parse(stdout).sinks, [
+    {
+      name: 'Trusted TV',
+      displayName: 'Trusted TV (ambiguous: 2 devices)',
+      startable: false,
+      ambiguous: true,
+      duplicateCount: 2,
+    },
+  ]);
 });

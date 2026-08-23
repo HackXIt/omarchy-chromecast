@@ -42,6 +42,24 @@ function runCastctl(args, env) {
   });
 }
 
+function runCastctlAsync(args, env) {
+  const child = childProcess.spawn(process.execPath, [bin, ...args], { env, encoding: 'utf8' });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve({ status: null, stdout, stderr: `${stderr}\ntimed out` });
+    }, 10000);
+    child.on('exit', (status) => {
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
+
 test('dummy Cast backend exercises plugin helper workflow commands', () => {
   const home = tempHome();
   const env = makeEnv(home);
@@ -89,4 +107,21 @@ test('dummy Cast backend exercises plugin helper workflow commands', () => {
       }
     }
   }
+});
+
+test('concurrent discovery commands serialize controller state and leave no active browser state', async () => {
+  const home = tempHome();
+  const env = makeEnv(home);
+  const paths = mod.resolvePaths(env);
+
+  const [first, second] = await Promise.all([
+    runCastctlAsync(['sinks'], env),
+    runCastctlAsync(['sinks'], env),
+  ]);
+
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(first.stdout.trim(), 'Dummy Living Room');
+  assert.equal(second.stdout.trim(), 'Dummy Living Room');
+  assert.equal(mod.readState(paths), null);
 });

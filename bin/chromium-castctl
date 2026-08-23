@@ -4,8 +4,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const net = require('node:net');
 const childProcess = require('node:child_process');
+const crypto = require('node:crypto');
 
 const ICON = '';
 const LOCAL_DEVTOOLS_ADDRESS = '127.0.0.1';
@@ -14,6 +14,16 @@ const STATUS_SINK_WAIT_MS = 1800;
 const DEFAULT_CDP_TIMEOUT_MS = 5000;
 const DEFAULT_BROWSER_START_TIMEOUT_MS = 12000;
 const PROFILE_VERSION = 4;
+const MAX_AVAHI_OUTPUT_BYTES = 256 * 1024;
+const MAX_CDP_HTTP_RESPONSE_BYTES = 1024 * 1024;
+const MAX_CDP_WS_MESSAGE_BYTES = 1024 * 1024;
+const MAX_SINKS = 64;
+const MAX_SINK_NAME_CHARS = 160;
+const MAX_TERMINAL_TEXT_CHARS = 1000;
+const DEFAULT_LOCK_TIMEOUT_MS = 30000;
+const LOCK_STALE_MS = 120000;
+const LOCK_RETRY_MS = 50;
+const CONTROL_OR_BIDI_PATTERN = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
 
 class CliError extends Error {
   constructor(message, exitCode = 1) {
@@ -23,11 +33,16 @@ class CliError extends Error {
   }
 }
 
+function absoluteOrFallback(value, fallback) {
+  return value && path.isAbsolute(value) ? value : fallback;
+}
+
 function resolvePaths(env = process.env) {
-  const home = env.HOME || os.homedir();
-  const dataHome = env.XDG_DATA_HOME || path.join(home, '.local', 'share');
-  const stateHome = env.XDG_STATE_HOME || path.join(home, '.local', 'state');
-  const cacheHome = env.XDG_CACHE_HOME || path.join(home, '.cache');
+  const fallbackHome = os.homedir();
+  const home = absoluteOrFallback(env.HOME, fallbackHome);
+  const dataHome = absoluteOrFallback(env.XDG_DATA_HOME, path.join(home, '.local', 'share'));
+  const stateHome = absoluteOrFallback(env.XDG_STATE_HOME, path.join(home, '.local', 'state'));
+  const cacheHome = absoluteOrFallback(env.XDG_CACHE_HOME, path.join(home, '.cache'));
 
   const dataDir = path.join(dataHome, 'chromium-castctl');
   const stateDir = path.join(stateHome, 'chromium-castctl');
@@ -41,14 +56,67 @@ function resolvePaths(env = process.env) {
     profileDir: path.join(dataDir, 'chromium-profile'),
     stateFile: path.join(stateDir, 'state.json'),
     uiStateFile: path.join(stateDir, 'ui-state.json'),
+    lockDir: path.join(stateDir, 'operation.lock'),
     logFile: path.join(cacheDir, 'chromium.log'),
     profileVersionFile: path.join(dataDir, 'profile-version'),
     hyprPortalConfig: path.join(home, '.config', 'hypr', 'xdph.conf'),
   };
 }
 
-function ensureDir(dir) {
-  fs.mkdirSync(dir, { recursive: true });
+function ensureDir(dir, mode = 0o700) {
+  fs.mkdirSync(dir, { recursive: true, mode });
+  const stat = fs.lstatSync(dir);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new CliError(`Refusing to use non-directory path: ${dir}`, 1);
+  }
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid() && stat.uid !== 0) {
+    throw new CliError(`Refusing to use directory not owned by this user or root: ${dir}`, 1);
+  }
+  try {
+    fs.chmodSync(dir, mode);
+  } catch {
+    // Best-effort hardening; existing ownership or filesystem policy may prevent chmod.
+  }
+}
+
+function randomToken() {
+  return typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+}
+
+function writeFileAtomic(file, content, mode = 0o600) {
+  ensureDir(path.dirname(file));
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomToken()}.tmp`);
+  let fd;
+  try {
+    fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, mode);
+    fs.writeFileSync(fd, content, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+
+  try {
+    fs.renameSync(tmp, file);
+    fs.chmodSync(file, mode);
+  } catch (error) {
+    try { fs.rmSync(tmp, { force: true }); } catch {}
+    throw error;
+  }
+}
+
+function openPrivateAppend(file) {
+  ensureDir(path.dirname(file));
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new CliError(`Refusing to write Chromium log through unsafe path: ${file}`, 1);
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND, 0o600);
+  try { fs.chmodSync(file, 0o600); } catch {}
+  return fd;
 }
 
 function readState(paths) {
@@ -65,9 +133,7 @@ function readState(paths) {
 
 function writeState(paths, state) {
   ensureDir(path.dirname(paths.stateFile));
-  const tmp = `${paths.stateFile}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-  fs.renameSync(tmp, paths.stateFile);
+  writeFileAtomic(paths.stateFile, `${JSON.stringify(state, null, 2)}\n`, 0o600);
 }
 
 function clearState(paths) {
@@ -95,6 +161,134 @@ function isPidAlive(pid) {
   }
 }
 
+function parseProcStat(statText) {
+  const endComm = statText.lastIndexOf(') ');
+  if (endComm === -1) return null;
+  const beforeComm = statText.slice(0, endComm + 1);
+  const pidText = beforeComm.slice(0, beforeComm.indexOf(' '));
+  const rest = statText.slice(endComm + 2).trim().split(/\s+/);
+  return {
+    pid: Number.parseInt(pidText, 10),
+    processGroupId: Number.parseInt(rest[2] || '', 10),
+    startTime: rest[19] || null,
+  };
+}
+
+function readProcessIdentity(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const stat = parseProcStat(fs.readFileSync(`/proc/${pid}/stat`, 'utf8'));
+    if (!stat || !stat.startTime) return null;
+    let cmdline = '';
+    try {
+      cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+    } catch {
+      cmdline = '';
+    }
+    return { ...stat, cmdline };
+  } catch {
+    return null;
+  }
+}
+
+function stateHasVerifiedBrowserProcess(state, paths) {
+  if (!state || !Number.isInteger(state.pid) || state.pid <= 0) return false;
+  if (state.userDataDir !== paths.profileDir) return false;
+  if (!state.processStartTime) return false;
+
+  const identity = readProcessIdentity(state.pid);
+  if (!identity || identity.startTime !== String(state.processStartTime)) return false;
+  if (state.pid === process.pid) return true;
+  if (Number.isInteger(state.processGroupId) && identity.processGroupId !== state.processGroupId) return false;
+
+  const args = identity.cmdline.split('\0').filter(Boolean);
+  return args.includes(`--user-data-dir=${paths.profileDir}`);
+}
+
+function lockTimeoutMs(env = process.env) {
+  const value = Number.parseInt(env.CHROMIUM_CASTCTL_LOCK_TIMEOUT_MS || '', 10);
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_LOCK_TIMEOUT_MS;
+}
+
+function readLockOwner(paths) {
+  try {
+    const raw = fs.readFileSync(path.join(paths.lockDir, 'owner.json'), 'utf8');
+    const owner = JSON.parse(raw);
+    return owner && typeof owner === 'object' ? owner : null;
+  } catch {
+    return null;
+  }
+}
+
+function lockIsStale(paths) {
+  let stat;
+  try {
+    stat = fs.lstatSync(paths.lockDir);
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return true;
+
+  const ageMs = Date.now() - stat.mtimeMs;
+  const owner = readLockOwner(paths);
+  if (!owner || !Number.isInteger(owner.pid)) return ageMs > LOCK_STALE_MS;
+  if (ageMs > LOCK_STALE_MS) return true;
+  if (!isPidAlive(owner.pid)) return true;
+  if (owner.processStartTime) {
+    const identity = readProcessIdentity(owner.pid);
+    if (!identity || identity.startTime !== String(owner.processStartTime)) return true;
+  }
+  return false;
+}
+
+async function acquireStateLock(paths, options = {}) {
+  const env = options.env || process.env;
+  const timeoutMs = options.lockTimeoutMs ?? lockTimeoutMs(env);
+  const deadline = Date.now() + timeoutMs;
+  ensureDir(paths.stateDir);
+
+  while (true) {
+    const owner = {
+      pid: process.pid,
+      processStartTime: readProcessIdentity(process.pid)?.startTime || null,
+      nonce: randomToken(),
+      createdAt: new Date().toISOString(),
+    };
+
+    try {
+      fs.mkdirSync(paths.lockDir, { mode: 0o700 });
+      writeFileAtomic(path.join(paths.lockDir, 'owner.json'), `${JSON.stringify(owner, null, 2)}\n`, 0o600);
+      return owner;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      if (lockIsStale(paths)) {
+        fs.rmSync(paths.lockDir, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new CliError('Chromecast action already in progress.', 1);
+      }
+      await sleep(Math.min(LOCK_RETRY_MS, Math.max(0, deadline - Date.now())));
+    }
+  }
+}
+
+function releaseStateLock(paths, owner) {
+  const current = readLockOwner(paths);
+  if (!current || current.nonce !== owner.nonce || current.pid !== owner.pid) return;
+  fs.rmSync(paths.lockDir, { recursive: true, force: true });
+}
+
+async function withStateLock(paths, options, callback) {
+  const owner = await acquireStateLock(paths, options);
+  try {
+    return await callback();
+  } finally {
+    releaseStateLock(paths, owner);
+  }
+}
+
 function readUiState(paths) {
   try {
     const raw = fs.readFileSync(paths.uiStateFile, 'utf8');
@@ -109,9 +303,7 @@ function readUiState(paths) {
 
 function writeUiState(paths, state) {
   ensureDir(path.dirname(paths.uiStateFile));
-  const tmp = `${paths.uiStateFile}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-  fs.renameSync(tmp, paths.uiStateFile);
+  writeFileAtomic(paths.uiStateFile, `${JSON.stringify(state, null, 2)}\n`, 0o600);
 }
 
 function clearUiState(paths, token = null) {
@@ -248,8 +440,10 @@ function avahiTimeoutMs(env = process.env) {
 
 function parseAvahiBrowseOutput(output) {
   const sinks = [];
-  const seen = new Set();
   const text = String(output || '');
+  if (Buffer.byteLength(text, 'utf8') > MAX_AVAHI_OUTPUT_BYTES) {
+    throw new CliError(`avahi-browse output exceeds ${MAX_AVAHI_OUTPUT_BYTES} bytes`, 1);
+  }
 
   for (const line of text.split(/\r?\n/)) {
     if (!line.includes('_googlecast._tcp')) continue;
@@ -259,9 +453,10 @@ function parseAvahiBrowseOutput(output) {
       const token = match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
       if (!token.startsWith('fn=')) continue;
       const name = token.slice(3).trim();
-      if (!name || seen.has(name)) continue;
-      seen.add(name);
-      sinks.push({ name, source: 'avahi' });
+      const normalized = normalizeSink({ name, source: 'avahi' });
+      if (!normalized) continue;
+      if (sinks.length >= MAX_SINKS) throw new CliError(`More than ${MAX_SINKS} Chromecast targets were reported`, 1);
+      sinks.push(normalized);
     }
   }
 
@@ -276,8 +471,13 @@ function discoverAvahiSinks(options = {}) {
   const result = childProcess.spawnSync(avahi, ['-rpt', '_googlecast._tcp'], {
     encoding: 'utf8',
     env,
+    maxBuffer: MAX_AVAHI_OUTPUT_BYTES,
     timeout: avahiTimeoutMs(env),
   });
+
+  if (result.error && result.error.code === 'ENOBUFS') {
+    throw new CliError(`avahi-browse output exceeds ${MAX_AVAHI_OUTPUT_BYTES} bytes`, 1);
+  }
 
   return parseAvahiBrowseOutput(result.stdout || '');
 }
@@ -292,6 +492,47 @@ function withTimeout(promise, timeoutMs, message) {
     timer = setTimeout(() => reject(new Error(message)), timeoutMs);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function responseTextBounded(response, maxBytes) {
+  const contentLength = typeof response.headers?.get === 'function'
+    ? Number.parseInt(response.headers.get('content-length') || '', 10)
+    : NaN;
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new Error(`CDP HTTP response exceeds ${maxBytes} bytes`);
+  }
+
+  if (response.body && typeof response.body.getReader === 'function') {
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = Buffer.from(value);
+        total += chunk.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => null);
+          throw new Error(`CDP HTTP response exceeds ${maxBytes} bytes`);
+        }
+        chunks.push(chunk);
+      }
+    } finally {
+      reader.releaseLock?.();
+    }
+    return Buffer.concat(chunks, total).toString('utf8');
+  }
+
+  if (typeof response.text === 'function') {
+    const text = await response.text();
+    if (Buffer.byteLength(text, 'utf8') > maxBytes) {
+      throw new Error(`CDP HTTP response exceeds ${maxBytes} bytes`);
+    }
+    return text;
+  }
+
+  return null;
 }
 
 async function fetchJson(url, options = {}) {
@@ -311,6 +552,9 @@ async function fetchJson(url, options = {}) {
     if (!response.ok) {
       throw new Error(`HTTP ${response.status} from ${url}`);
     }
+
+    const text = await responseTextBounded(response, options.maxBytes || MAX_CDP_HTTP_RESPONSE_BYTES);
+    if (text !== null) return JSON.parse(text);
     return await response.json();
   } finally {
     clearTimeout(timer);
@@ -321,9 +565,39 @@ async function fetchTargets(port, options = {}) {
   return fetchJson(`http://${LOCAL_DEVTOOLS_ADDRESS}:${port}/json/list`, options);
 }
 
-function selectPageTarget(targets) {
+function validateCdpWebSocketUrl(webSocketDebuggerUrl, expectedPort) {
+  let parsed;
+  try {
+    parsed = new URL(String(webSocketDebuggerUrl || ''));
+  } catch {
+    throw new CliError(`Invalid CDP WebSocket URL from Chromium: ${webSocketDebuggerUrl}`, 1);
+  }
+
+  if (parsed.protocol !== 'ws:'
+    || parsed.hostname !== LOCAL_DEVTOOLS_ADDRESS
+    || parsed.port !== String(expectedPort)
+    || parsed.username
+    || parsed.password) {
+    throw new CliError(`Invalid CDP WebSocket URL from Chromium: ${webSocketDebuggerUrl}`, 1);
+  }
+  return webSocketDebuggerUrl;
+}
+
+function selectPageTarget(targets, expectedPort = null) {
   if (!Array.isArray(targets)) return null;
-  return targets.find((target) => target && target.type === 'page' && target.webSocketDebuggerUrl) || null;
+  let invalidUrlError = null;
+  for (const target of targets) {
+    if (!target || target.type !== 'page' || !target.webSocketDebuggerUrl) continue;
+    if (expectedPort === null) return target;
+    try {
+      validateCdpWebSocketUrl(target.webSocketDebuggerUrl, expectedPort);
+      return target;
+    } catch (error) {
+      invalidUrlError = error;
+    }
+  }
+  if (invalidUrlError) throw invalidUrlError;
+  return null;
 }
 
 async function createPageTarget(port, options = {}) {
@@ -337,34 +611,16 @@ async function createPageTarget(port, options = {}) {
 
 async function getPageTarget(port, options = {}) {
   let targets = await fetchTargets(port, options);
-  let target = selectPageTarget(targets);
+  let target = selectPageTarget(targets, port);
   if (target) return target;
 
   await createPageTarget(port, options);
   targets = await fetchTargets(port, options);
-  target = selectPageTarget(targets);
+  target = selectPageTarget(targets, port);
   if (!target) {
     throw new CliError('Chromium CDP has no page target. Try stopping chromium-castctl and retrying.', 1);
   }
   return target;
-}
-
-function parseAddressPort(address) {
-  return address && typeof address === 'object' ? address.port : null;
-}
-
-function allocateLocalPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.on('error', reject);
-    server.listen(0, LOCAL_DEVTOOLS_ADDRESS, () => {
-      const port = parseAddressPort(server.address());
-      server.close((error) => {
-        if (error) reject(error);
-        else resolve(port);
-      });
-    });
-  });
 }
 
 function castAudioEnabled(env = process.env) {
@@ -412,12 +668,15 @@ async function waitForCdp(port, options = {}) {
 }
 
 async function stateHasUsableCdp(state, options = {}) {
+  const paths = options.paths;
   if (!state || !Number.isInteger(state.pid) || !Number.isInteger(state.port)) return false;
   if (state.remoteDebuggingAddress && state.remoteDebuggingAddress !== LOCAL_DEVTOOLS_ADDRESS) return false;
+  if (paths && !stateHasVerifiedBrowserProcess(state, paths)) return false;
   if (!isPidAlive(state.pid)) return false;
 
   try {
-    await fetchTargets(state.port, { ...options, timeoutMs: 1000 });
+    const targets = await fetchTargets(state.port, { ...options, timeoutMs: 1000 });
+    selectPageTarget(targets, state.port);
     return true;
   } catch {
     return false;
@@ -433,20 +692,25 @@ function stateMatchesLaunchConfig(state, paths, env = process.env) {
 }
 
 function signalBrowserProcess(state, paths, signal) {
-  if (!state || !Number.isInteger(state.pid) || state.userDataDir !== paths.profileDir) return;
-  if (state.pid === process.pid) return;
+  if (!state || !Number.isInteger(state.pid) || state.userDataDir !== paths.profileDir) return false;
+  if (state.pid === process.pid) return false;
+  if (!stateHasVerifiedBrowserProcess(state, paths)) return false;
 
-  try {
-    process.kill(-state.pid, signal);
-    return;
-  } catch {
-    // Fall back to signaling just the browser PID below.
+  const identity = readProcessIdentity(state.pid);
+  if (Number.isInteger(state.processGroupId) && identity && identity.processGroupId === state.processGroupId) {
+    try {
+      process.kill(-state.processGroupId, signal);
+      return true;
+    } catch {
+      // Fall back to signaling just the verified browser PID below.
+    }
   }
 
   try {
     process.kill(state.pid, signal);
+    return true;
   } catch {
-    // Best-effort cleanup only; stale state is still removed below.
+    return false;
   }
 }
 
@@ -464,10 +728,10 @@ async function waitForPidExit(pid, timeoutMs) {
 }
 
 async function discardStateBrowser(paths, state) {
-  if (state && Number.isInteger(state.pid) && state.pid !== process.pid) {
+  if (state && Number.isInteger(state.pid) && state.pid !== process.pid && stateHasVerifiedBrowserProcess(state, paths)) {
     terminateStateBrowser(state, paths);
     await waitForPidExit(state.pid, 1500);
-    if (isPidAlive(state.pid)) {
+    if (isPidAlive(state.pid) && stateHasVerifiedBrowserProcess(state, paths)) {
       signalBrowserProcess(state, paths, 'SIGKILL');
       await waitForPidExit(state.pid, 500);
     }
@@ -479,6 +743,10 @@ async function shutdownBrowser(paths, browser, client) {
   const state = browser || readState(paths);
   if (!state) return false;
   if (state.pid === process.pid) {
+    clearState(paths);
+    return true;
+  }
+  if (!stateHasVerifiedBrowserProcess(state, paths)) {
     clearState(paths);
     return true;
   }
@@ -524,13 +792,50 @@ function resetIsolatedProfile(paths) {
 }
 
 function writeProfileVersion(paths) {
-  ensureDir(paths.dataDir);
-  fs.writeFileSync(paths.profileVersionFile, `${PROFILE_VERSION}\n`, 'utf8');
+  writeFileAtomic(paths.profileVersionFile, `${PROFILE_VERSION}\n`, 0o600);
 }
 
 function prepareFreshProfile(paths) {
   resetIsolatedProfile(paths);
   writeProfileVersion(paths);
+}
+
+function readDevToolsActivePort(paths) {
+  const file = path.join(paths.profileDir, 'DevToolsActivePort');
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  if (Buffer.byteLength(raw, 'utf8') > 4096) throw new Error('DevToolsActivePort is unexpectedly large');
+  const [portText] = raw.split(/\r?\n/);
+  const port = Number.parseInt(portText || '', 10);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error('DevToolsActivePort did not contain a valid port');
+  }
+  return port;
+}
+
+async function waitForDevToolsActivePort(paths, child, options = {}) {
+  const timeoutMs = options.browserStartTimeoutMs || browserStartTimeoutMs(options.env || process.env);
+  const started = Date.now();
+  let lastError;
+  while (Date.now() - started < timeoutMs) {
+    if (child.exitCode !== null || child.signalCode !== null || !isPidAlive(child.pid)) {
+      throw new Error('Chromium exited before DevTools became available');
+    }
+    try {
+      const port = readDevToolsActivePort(paths);
+      if (port) return port;
+    } catch (error) {
+      lastError = error;
+      break;
+    }
+    await sleep(100);
+  }
+  throw lastError || new Error('Timed out waiting for Chromium DevToolsActivePort');
 }
 
 async function getReusableBrowser(paths, options = {}) {
@@ -540,9 +845,9 @@ async function getReusableBrowser(paths, options = {}) {
     await discardStateBrowser(paths, state);
     return null;
   }
-  if (await stateHasUsableCdp(state, options)) return state;
+  if (await stateHasUsableCdp(state, { ...options, paths })) return state;
 
-  if (state && isPidAlive(state.pid) && Number.isInteger(state.port)) {
+  if (state && stateHasVerifiedBrowserProcess(state, paths) && isPidAlive(state.pid) && Number.isInteger(state.port)) {
     try {
       await waitForCdp(state.port, {
         ...options,
@@ -567,10 +872,8 @@ async function launchChromium(paths, options = {}) {
 
   prepareFreshProfile(paths);
   ensureDir(paths.profileDir);
-  ensureDir(path.dirname(paths.logFile));
-  const port = await allocateLocalPort();
-  const args = chromiumLaunchArgs(paths, port, env);
-  const logFd = fs.openSync(paths.logFile, 'a');
+  const args = chromiumLaunchArgs(paths, 0, env);
+  const logFd = openPrivateAppend(paths.logFile);
   let child;
   try {
     child = childProcess.spawn(executable, args, {
@@ -583,9 +886,10 @@ async function launchChromium(paths, options = {}) {
   }
 
   child.unref();
-  const state = {
+  const processIdentity = readProcessIdentity(child.pid) || {};
+  let state = {
     pid: child.pid,
-    port,
+    port: null,
     remoteDebuggingAddress: LOCAL_DEVTOOLS_ADDRESS,
     userDataDir: paths.profileDir,
     logFile: paths.logFile,
@@ -593,12 +897,17 @@ async function launchChromium(paths, options = {}) {
     launchMode: 'headless',
     profileVersion: PROFILE_VERSION,
     castAudio: castAudioEnabled(env),
+    processStartTime: processIdentity.startTime || null,
+    processGroupId: Number.isInteger(processIdentity.processGroupId) ? processIdentity.processGroupId : child.pid,
+    launchNonce: randomToken(),
     startedAt: new Date().toISOString(),
     lastActiveSink: null,
   };
-  writeState(paths, state);
 
   try {
+    const port = await waitForDevToolsActivePort(paths, child, options);
+    state = { ...state, port };
+    writeState(paths, state);
     await waitForCdp(port, options);
     await minimizeChromiumWindow(port, options);
   } catch (error) {
@@ -630,26 +939,43 @@ function addWsListener(ws, event, handler, options) {
   throw new Error('WebSocket implementation does not support events');
 }
 
-async function messageDataToString(data) {
-  if (typeof data === 'string') return data;
-  if (Buffer.isBuffer(data)) return data.toString('utf8');
-  if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8');
-  if (ArrayBuffer.isView(data)) return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('utf8');
-  if (data && typeof data.text === 'function') return data.text();
-  return String(data);
+function dataByteLength(data) {
+  if (typeof data === 'string') return Buffer.byteLength(data, 'utf8');
+  if (Buffer.isBuffer(data)) return data.byteLength;
+  if (data instanceof ArrayBuffer) return data.byteLength;
+  if (ArrayBuffer.isView(data)) return data.byteLength;
+  if (data && Number.isFinite(data.size)) return data.size;
+  return Buffer.byteLength(String(data), 'utf8');
+}
+
+async function messageDataToString(data, maxBytes = MAX_CDP_WS_MESSAGE_BYTES) {
+  const byteLength = dataByteLength(data);
+  if (byteLength > maxBytes) throw new Error(`CDP WebSocket message exceeds ${maxBytes} bytes`);
+
+  let text;
+  if (typeof data === 'string') text = data;
+  else if (Buffer.isBuffer(data)) text = data.toString('utf8');
+  else if (data instanceof ArrayBuffer) text = Buffer.from(data).toString('utf8');
+  else if (ArrayBuffer.isView(data)) text = Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('utf8');
+  else if (data && typeof data.text === 'function') text = await data.text();
+  else text = String(data);
+
+  if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new Error(`CDP WebSocket message exceeds ${maxBytes} bytes`);
+  return text;
 }
 
 class CdpClient {
-  constructor(ws) {
+  constructor(ws, options = {}) {
     this.ws = ws;
     this.nextId = 1;
     this.pending = new Map();
     this.handlers = new Map();
     this.closed = false;
+    this.maxMessageBytes = options.maxMessageBytes || MAX_CDP_WS_MESSAGE_BYTES;
 
     addWsListener(ws, 'message', (event) => {
       const data = event && typeof event === 'object' && 'data' in event ? event.data : event;
-      this.handleMessage(data).catch(() => {});
+      this.handleMessage(data).catch((error) => this.rejectAll(error));
     });
     addWsListener(ws, 'close', () => this.rejectAll(new Error('CDP WebSocket closed')));
     addWsListener(ws, 'error', (event) => {
@@ -678,7 +1004,7 @@ class CdpClient {
       });
     }), options.timeoutMs || cdpTimeoutMs(options.env || process.env), 'Timed out opening CDP WebSocket');
 
-    return new CdpClient(ws);
+    return new CdpClient(ws, options);
   }
 
   rejectAll(error) {
@@ -692,7 +1018,7 @@ class CdpClient {
   }
 
   async handleMessage(data) {
-    const text = await messageDataToString(data);
+    const text = await messageDataToString(data, this.maxMessageBytes);
     const message = JSON.parse(text);
 
     if (message.id && this.pending.has(message.id)) {
@@ -796,12 +1122,17 @@ async function enableCastAndCollectSinks(client, options = {}) {
   });
 
   const off = client.onEvent('Cast.sinksUpdated', (params) => {
-    latest = Array.isArray(params.sinks) ? params.sinks : [];
-    eventCount += 1;
-    resolveNextEvent(latest);
-    nextEvent = new Promise((resolve) => {
-      resolveNextEvent = resolve;
-    });
+    try {
+      latest = normalizeSinkList(params.sinks || []);
+      eventCount += 1;
+      resolveNextEvent(latest);
+      nextEvent = new Promise((resolve) => {
+        resolveNextEvent = resolve;
+      });
+    } catch (error) {
+      enableError = error;
+      resolveNextEvent([]);
+    }
   });
 
   const waitMs = options.waitMs ?? DEFAULT_SINK_WAIT_MS;
@@ -868,9 +1199,44 @@ async function withCastClient(paths, options, callback) {
       emptySinkRetryDelayMs: options.emptySinkRetryDelayMs,
     });
     return await callback({ browser, client, sinks });
+  } catch (error) {
+    await shutdownBrowser(paths, browser, client).catch(() => null);
+    throw error;
   } finally {
     client.close();
   }
+}
+
+function truncateText(value, maxChars = MAX_TERMINAL_TEXT_CHARS) {
+  const text = String(value || '');
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
+function stripControlsForDisplay(value, maxChars = MAX_TERMINAL_TEXT_CHARS) {
+  return truncateText(String(value || '').replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, '�'), maxChars);
+}
+
+function normalizeSink(sink) {
+  if (!sink || typeof sink !== 'object') return null;
+  const name = String(sink.name || '').trim();
+  if (!name) return null;
+  if (name.length > MAX_SINK_NAME_CHARS) return null;
+  if (CONTROL_OR_BIDI_PATTERN.test(name)) return null;
+  return { ...sink, name };
+}
+
+function normalizeSinkList(sinks) {
+  if (!Array.isArray(sinks)) return [];
+  if (sinks.length > MAX_SINKS) throw new CliError(`More than ${MAX_SINKS} Chromecast targets were reported`, 1);
+  const normalized = [];
+  for (const sink of sinks) {
+    const next = normalizeSink(sink);
+    if (!next) continue;
+    normalized.push(next);
+    if (normalized.length > MAX_SINKS) throw new CliError(`More than ${MAX_SINKS} Chromecast targets were usable`, 1);
+  }
+  return normalized;
 }
 
 function sinkIsActive(sink) {
@@ -878,20 +1244,71 @@ function sinkIsActive(sink) {
 }
 
 function activeSinks(sinks) {
-  return (sinks || []).filter(sinkIsActive);
+  return normalizeSinkList(sinks || []).filter(sinkIsActive);
+}
+
+function sinkNameKey(name) {
+  return String(name || '').toLocaleLowerCase();
+}
+
+function groupedSinkRows(sinks) {
+  const normalized = normalizeSinkList(sinks || []);
+  const groups = new Map();
+  for (const sink of normalized) {
+    const key = sinkNameKey(sink.name);
+    const group = groups.get(key) || [];
+    group.push(sink);
+    groups.set(key, group);
+  }
+
+  return [...groups.values()].map((group) => {
+    const name = group[0].name;
+    const duplicateCount = group.length;
+    const ambiguous = duplicateCount > 1;
+    return {
+      name,
+      displayName: ambiguous ? `${stripControlsForDisplay(name, MAX_SINK_NAME_CHARS)} (ambiguous: ${duplicateCount} devices)` : stripControlsForDisplay(name, MAX_SINK_NAME_CHARS),
+      startable: !ambiguous,
+      ambiguous,
+      duplicateCount,
+    };
+  });
+}
+
+function assertNoAmbiguousSinks(sinks) {
+  const ambiguous = groupedSinkRows(sinks).filter((row) => row.ambiguous);
+  if (ambiguous.length > 0) {
+    throw new CliError(
+      `Ambiguous Chromecast target name: ${ambiguous.map((row) => row.name).join(', ')}. Rename one receiver or choose a unique target.`,
+      1,
+    );
+  }
 }
 
 function matchSink(sinks, requestedName) {
   const requested = String(requestedName || '').trim();
   if (!requested) return null;
-  const exact = sinks.find((sink) => sink.name === requested);
-  if (exact) return exact;
-  const lower = requested.toLowerCase();
-  return sinks.find((sink) => String(sink.name || '').toLowerCase() === lower) || null;
+  if (requested.length > MAX_SINK_NAME_CHARS || CONTROL_OR_BIDI_PATTERN.test(requested)) {
+    throw new CliError('Unsafe Chromecast target name; refusing to start desktop mirroring.', 1);
+  }
+
+  const normalized = normalizeSinkList(sinks || []);
+  const exact = normalized.filter((sink) => sink.name === requested);
+  if (exact.length > 1) throw new CliError(`Ambiguous Chromecast target name: ${requested}. Rename one receiver or choose a unique target.`, 1);
+  if (exact.length === 1) return exact[0];
+
+  const lower = requested.toLocaleLowerCase();
+  const caseInsensitive = normalized.filter((sink) => sinkNameKey(sink.name) === lower);
+  if (caseInsensitive.length > 1) throw new CliError(`Ambiguous Chromecast target name: ${requested}. Rename one receiver or choose a unique target.`, 1);
+  return caseInsensitive[0] || null;
 }
 
 function formatSinkList(sinks) {
-  return sinks.map((sink) => sink.name).filter(Boolean).join('\n');
+  return groupedSinkRows(sinks).map((row) => row.displayName).filter(Boolean).join('\n');
+}
+
+function formatSinkJson(sinks) {
+  return JSON.stringify({ sinks: groupedSinkRows(sinks) });
 }
 
 async function getStatus(paths, options = {}) {
@@ -919,7 +1336,7 @@ async function getStatus(paths, options = {}) {
 }
 
 function escapeUiText(value) {
-  return String(value || '')
+  return stripControlsForDisplay(value, MAX_TERMINAL_TEXT_CHARS)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -968,12 +1385,13 @@ function writeError(io, message = '') {
   io.stderr.write(`${message}\n`);
 }
 
-async function commandSinks(paths, options, io) {
+async function commandSinks(paths, options, io, args = []) {
+  const jsonOutput = args.includes('--json');
   return withCastClient(paths, {
     ...options,
     waitMs: options.waitMs ?? sinkWaitMs(options.env),
   }, async ({ browser, client, sinks }) => {
-    const output = formatSinkList(sinks);
+    const output = jsonOutput ? formatSinkJson(sinks) : formatSinkList(sinks);
     if (output) writeLine(io, output);
     if (activeSinks(sinks).length === 0) await shutdownBrowser(paths, browser, client);
     return 0;
@@ -996,7 +1414,7 @@ async function commandStart(paths, options, io, requestedName) {
 
     await client.send('Cast.startDesktopMirroring', { sinkName: sink.name }, 10000);
     updateState(paths, (state) => ({ ...state, lastActiveSink: sink.name }));
-    writeLine(io, `Started desktop mirroring to ${sink.name}. Confirm the Wayland screen-share portal if prompted.`);
+    writeLine(io, `Started desktop mirroring to ${stripControlsForDisplay(sink.name)}. Confirm the Wayland screen-share portal if prompted.`);
     return 0;
   }));
 }
@@ -1020,12 +1438,24 @@ async function commandStop(paths, options, io) {
       return 0;
     }
 
+    const failed = [];
     for (const sink of active) {
-      await client.send('Cast.stopCasting', { sinkName: sink.name }, 10000);
+      try {
+        await client.send('Cast.stopCasting', { sinkName: sink.name }, 10000);
+      } catch (error) {
+        failed.push({ sink, error });
+      }
     }
+
     updateState(paths, (state) => ({ ...state, lastActiveSink: null }));
     await shutdownBrowser(paths, browser, client);
-    writeLine(io, `Stopped casting to ${active.map((sink) => sink.name).join(', ')} and closed Chromium control browser.`);
+
+    if (failed.length > 0) {
+      writeError(io, `Failed to stop casting for ${failed.map(({ sink }) => stripControlsForDisplay(sink.name)).join(', ')}; local Chromium cleanup was attempted.`);
+      return 1;
+    }
+
+    writeLine(io, `Stopped casting to ${active.map((sink) => stripControlsForDisplay(sink.name)).join(', ')} and closed Chromium control browser.`);
     return 0;
   }));
 }
@@ -1051,6 +1481,7 @@ function runWalker(sinks, options = {}) {
   const env = options.env || process.env;
   const walker = requireWalker(env);
 
+  assertNoAmbiguousSinks(sinks);
   const input = `${sinks.map((sink) => sink.name).join('\n')}\n`;
   const result = childProcess.spawnSync(walker, ['--dmenu', '--placeholder', 'Cast to…'], {
     input,
@@ -1073,41 +1504,21 @@ async function commandPick(paths, options, io) {
 
     const avahiSinks = discoverAvahiSinks(options);
     if (avahiSinks.length > 0) {
+      assertNoAmbiguousSinks(avahiSinks);
       let selected = avahiSinks.length === 1 ? avahiSinks[0].name : null;
-      let prewarm = null;
       if (!selected) {
         requireWalker(env);
-        prewarm = spawnPrewarmBrowser(options);
         if (token) updateUiStateLabel(paths, token, 'Choose a Chromecast target in Walker…', env);
-        try {
-          selected = runWalker(avahiSinks, options);
-        } catch (error) {
-          try {
-            process.kill(prewarm.pid, 'SIGTERM');
-          } catch {
-            // Best-effort: the helper may already have exited after launching Chromium.
-          }
-          await sleep(500);
-          await shutdownBrowser(paths, readState(paths), null);
-          throw error;
-        }
+        selected = runWalker(avahiSinks, options);
       }
 
       if (!selected) {
-        if (prewarm) {
-          try {
-            process.kill(prewarm.pid, 'SIGTERM');
-          } catch {
-            // Best-effort: the helper may already have exited after launching Chromium.
-          }
-        }
-        await sleep(500);
         await shutdownBrowser(paths, readState(paths), null);
         writeLine(io, 'No sink selected; closed Chromium control browser.');
         return 0;
       }
 
-      if (token) updateUiStateLabel(paths, token, `Starting cast to ${selected}…`, env);
+      if (token) updateUiStateLabel(paths, token, `Starting cast to ${stripControlsForDisplay(selected)}…`, env);
       return withCastClient(paths, {
         ...options,
         waitMs: options.waitMs ?? sinkWaitMs(options.env),
@@ -1121,7 +1532,7 @@ async function commandPick(paths, options, io) {
 
         await client.send('Cast.startDesktopMirroring', { sinkName: sink.name }, 10000);
         updateState(paths, (state) => ({ ...state, lastActiveSink: sink.name }));
-        writeLine(io, `Started desktop mirroring to ${sink.name}. Confirm the Wayland screen-share portal if prompted.`);
+        writeLine(io, `Started desktop mirroring to ${stripControlsForDisplay(sink.name)}. Confirm the Wayland screen-share portal if prompted.`);
         return 0;
       });
     }
@@ -1130,12 +1541,13 @@ async function commandPick(paths, options, io) {
       ...options,
       waitMs: options.waitMs ?? sinkWaitMs(options.env),
     }, async ({ browser, client, sinks }) => {
-      const namedSinks = sinks.filter((sink) => sink.name);
+      const namedSinks = normalizeSinkList(sinks).filter((sink) => sink.name);
       if (namedSinks.length === 0) {
         await shutdownBrowser(paths, browser, client);
         throw new CliError('No Cast sinks found. Check that Chromium can see the Chromecast and both devices are on the same network.', 1);
       }
 
+      assertNoAmbiguousSinks(namedSinks);
       let selected = namedSinks.length === 1 ? namedSinks[0].name : null;
       if (!selected) {
         if (token) updateUiStateLabel(paths, token, 'Choose a Chromecast target in Walker…', env);
@@ -1156,7 +1568,7 @@ async function commandPick(paths, options, io) {
       if (!sink) throw new CliError(`Selected sink disappeared: ${selected}`, 1);
       await client.send('Cast.startDesktopMirroring', { sinkName: sink.name }, 10000);
       updateState(paths, (state) => ({ ...state, lastActiveSink: sink.name }));
-      writeLine(io, `Started desktop mirroring to ${sink.name}. Confirm the Wayland screen-share portal if prompted.`);
+      writeLine(io, `Started desktop mirroring to ${stripControlsForDisplay(sink.name)}. Confirm the Wayland screen-share portal if prompted.`);
       return 0;
     });
   });
@@ -1226,7 +1638,7 @@ async function commandStatus(paths, options, io, waybar = false) {
   if (status.busy) {
     writeLine(io, `busy: ${status.busy.label || 'Chromecast action in progress…'}`);
   } else if (status.activeSink) {
-    writeLine(io, `active: ${status.activeSink}`);
+    writeLine(io, `active: ${stripControlsForDisplay(status.activeSink)}`);
   } else {
     writeLine(io, 'idle');
   }
@@ -1299,7 +1711,7 @@ async function collectDoctorResults(paths, options = {}) {
 
   const state = readState(paths);
   if (state) {
-    const usable = await stateHasUsableCdp(state, { ...options, timeoutMs: 1000 }).catch(() => false);
+    const usable = await stateHasUsableCdp(state, { ...options, paths, timeoutMs: 1000 }).catch(() => false);
     addDoctorResult(results, usable ? 'ok' : 'warn', 'existing chromium-castctl browser', usable ? `pid=${state.pid} port=${state.port}` : 'stale state will be replaced on next start');
     if (state.remoteDebuggingAddress && state.remoteDebuggingAddress !== LOCAL_DEVTOOLS_ADDRESS) {
       addDoctorResult(results, 'fail', 'existing DevTools bind address', state.remoteDebuggingAddress);
@@ -1342,6 +1754,43 @@ Commands:
 `;
 }
 
+function commandUsesStateLock(command) {
+  return ['sinks', 'pick', 'start', 'stop', 'toggle', 'waybar-toggle', 'quit-browser', 'prewarm-browser'].includes(command);
+}
+
+async function dispatchCommand(command, args, paths, options, io) {
+  switch (command) {
+    case undefined:
+    case '-h':
+    case '--help':
+    case 'help':
+      io.stdout.write(usage());
+      return 0;
+    case 'doctor':
+      return commandDoctor(paths, options, io, args);
+    case 'sinks':
+      return commandSinks(paths, options, io, args);
+    case 'pick':
+      return commandPick(paths, options, io);
+    case 'start':
+      return commandStart(paths, options, io, args.join(' '));
+    case 'stop':
+      return commandStop(paths, options, io);
+    case 'toggle':
+      return commandToggle(paths, options, io);
+    case 'waybar-toggle':
+      return commandWaybarToggle(paths, options, io);
+    case 'status':
+      return commandStatus(paths, options, io, args.includes('--waybar'));
+    case 'quit-browser':
+      return commandQuitBrowser(paths, io);
+    case 'prewarm-browser':
+      return commandPrewarmBrowser(paths, options);
+    default:
+      throw new CliError(`Unknown command: ${command}\n\n${usage()}`, 2);
+  }
+}
+
 async function run(argv = process.argv.slice(2), io = { stdout: process.stdout, stderr: process.stderr }, env = process.env, deps = {}) {
   const paths = deps.paths || resolvePaths(env);
   const options = {
@@ -1354,36 +1803,10 @@ async function run(argv = process.argv.slice(2), io = { stdout: process.stdout, 
 
   const [command, ...args] = argv;
   try {
-    switch (command) {
-      case undefined:
-      case '-h':
-      case '--help':
-      case 'help':
-        io.stdout.write(usage());
-        return 0;
-      case 'doctor':
-        return await commandDoctor(paths, options, io, args);
-      case 'sinks':
-        return await commandSinks(paths, options, io);
-      case 'pick':
-        return await commandPick(paths, options, io);
-      case 'start':
-        return await commandStart(paths, options, io, args.join(' '));
-      case 'stop':
-        return await commandStop(paths, options, io);
-      case 'toggle':
-        return await commandToggle(paths, options, io);
-      case 'waybar-toggle':
-        return await commandWaybarToggle(paths, options, io);
-      case 'status':
-        return await commandStatus(paths, options, io, args.includes('--waybar'));
-      case 'quit-browser':
-        return await commandQuitBrowser(paths, io);
-      case 'prewarm-browser':
-        return await commandPrewarmBrowser(paths, options);
-      default:
-        throw new CliError(`Unknown command: ${command}\n\n${usage()}`, 2);
+    if (commandUsesStateLock(command)) {
+      return await withStateLock(paths, options, () => dispatchCommand(command, args, paths, options, io));
     }
+    return await dispatchCommand(command, args, paths, options, io);
   } catch (error) {
     if (error instanceof CliError) {
       writeError(io, error.message);
@@ -1422,6 +1845,7 @@ module.exports = {
   discoverAvahiSinks,
   minimizeChromiumWindow,
   minimizePageWindow,
+  readProcessIdentity,
   readState,
   renderWaybarStatus,
   resolvePaths,
