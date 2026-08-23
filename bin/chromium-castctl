@@ -23,6 +23,8 @@ const MAX_TERMINAL_TEXT_CHARS = 1000;
 const DEFAULT_LOCK_TIMEOUT_MS = 30000;
 const LOCK_STALE_MS = 120000;
 const LOCK_RETRY_MS = 50;
+// Matches C0 controls (U+0000-U+001F), DEL/C1 controls (U+007F-U+009F),
+// and Unicode bidi override/isolate controls (U+202A-U+202E, U+2066-U+2069).
 const CONTROL_OR_BIDI_PATTERN = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
 
 class CliError extends Error {
@@ -1223,6 +1225,7 @@ function truncateText(value, maxChars = MAX_TERMINAL_TEXT_CHARS) {
 }
 
 function stripControlsForDisplay(value, maxChars = MAX_TERMINAL_TEXT_CHARS) {
+  // Same control/bidi ranges as CONTROL_OR_BIDI_PATTERN, with /g to replace every occurrence.
   return truncateText(String(value || '').replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, '�'), maxChars);
 }
 

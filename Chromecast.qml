@@ -80,6 +80,7 @@ BarWidget {
 
   function safeCastctlPath(value) {
     var text = String(value || "")
+    // Reject C0 controls (U+0000-U+001F) and DEL/C1 controls (U+007F-U+009F) in helper paths.
     return text.indexOf("/") === 0 && !/[\u0000-\u001f\u007f-\u009f]/.test(text)
   }
 
@@ -91,6 +92,8 @@ BarWidget {
   }
 
   function safeDisplayText(value, maxLength) {
+    // Replace C0 controls (U+0000-U+001F), DEL/C1 controls (U+007F-U+009F),
+    // and bidi override/isolate controls (U+202A-U+202E, U+2066-U+2069) in untrusted display text.
     var text = String(value || "").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "�")
     return limitRawText(text, maxLength)
   }
