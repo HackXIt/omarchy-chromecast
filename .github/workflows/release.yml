@@ -56,7 +56,12 @@ jobs:
         run: node --check bin/chromium-castctl test/fixtures/dummy-chromium-cast
 
       - name: Check shell script syntax
-        run: bash -n install.sh scripts/validate-plugin.sh scripts/check-actions-pinned.sh
+        run: bash -n install.sh scripts/validate-plugin.sh scripts/check-actions-pinned.sh scripts/release-notes.sh
+
+      - name: Build release notes
+        run: |
+          mkdir -p dist
+          ./scripts/release-notes.sh "$GITHUB_REF_NAME" > dist/RELEASE_NOTES.md
 
       - name: Build release archives
         run: |
@@ -101,4 +106,4 @@ jobs:
             dist/omarchy-chromecast-${GITHUB_REF_NAME}.zip \
             --verify-tag \
             --title "omarchy-chromecast ${GITHUB_REF_NAME}" \
-            --generate-notes
+            --notes-file dist/RELEASE_NOTES.md

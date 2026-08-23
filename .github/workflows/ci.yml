@@ -34,4 +34,7 @@ jobs:
         run: node --check bin/chromium-castctl test/fixtures/dummy-chromium-cast
 
       - name: Check shell script syntax
-        run: bash -n install.sh scripts/validate-plugin.sh scripts/check-actions-pinned.sh
+        run: bash -n install.sh scripts/validate-plugin.sh scripts/check-actions-pinned.sh scripts/release-notes.sh
+
+      - name: Check release notes extraction
+        run: ./scripts/release-notes.sh "v$(jq -r '.version' manifest.json)" >/dev/null
