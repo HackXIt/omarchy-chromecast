@@ -224,6 +224,19 @@ function processExecutable(pid) {
   }
 }
 
+function processExecutableIdentity(pid) {
+  let fd;
+  try {
+    fd = fs.openSync(`/proc/${pid}/exe`, fs.constants.O_RDONLY);
+    const stat = fs.fstatSync(fd, { bigint: true });
+    return { device: String(stat.dev), inode: String(stat.ino) };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 function configuredBrowserExecutable(env = process.env) {
   const executable = findExecutable(chromiumCommand(env), env);
   if (!executable) return null;
@@ -240,6 +253,8 @@ function readBrowserIdentity(paths) {
     if (!identity || typeof identity !== 'object') return null;
     if (typeof identity.configuredExecutable !== 'string') return null;
     if (typeof identity.browserExecutable !== 'string') return null;
+    if (typeof identity.browserDevice !== 'string') return null;
+    if (typeof identity.browserInode !== 'string') return null;
     if (typeof identity.launchToken !== 'string' || !identity.launchToken) return null;
     return identity;
   } catch {
@@ -259,13 +274,16 @@ function processIsProfileBrowser(identity, paths, env = process.env) {
 
   const actualExecutable = processExecutable(identity.pid);
   const configuredExecutable = configuredBrowserExecutable(env);
-  if (!actualExecutable || !configuredExecutable) return false;
+  if (!configuredExecutable) return false;
   if (actualExecutable === configuredExecutable) return true;
 
   const launched = readBrowserIdentity(paths);
+  const actualIdentity = processExecutableIdentity(identity.pid);
   return Boolean(launched
     && launched.configuredExecutable === configuredExecutable
-    && launched.browserExecutable === actualExecutable
+    && actualIdentity
+    && launched.browserDevice === actualIdentity.device
+    && launched.browserInode === actualIdentity.inode
     && args.includes(`--chromium-castctl-launch-token=${launched.launchToken}`));
 }
 
@@ -1062,8 +1080,15 @@ async function launchChromium(paths, options = {}) {
   try {
     const port = await waitForDevToolsActivePort(paths, child, options);
     const browserExecutable = processExecutable(child.pid);
-    if (!browserExecutable) throw new Error('Could not verify launched Chromium executable');
-    writeBrowserIdentity(paths, { configuredExecutable, browserExecutable, launchToken });
+    const browserIdentity = processExecutableIdentity(child.pid);
+    if (!browserExecutable || !browserIdentity) throw new Error('Could not verify launched Chromium executable');
+    writeBrowserIdentity(paths, {
+      configuredExecutable,
+      browserExecutable,
+      browserDevice: browserIdentity.device,
+      browserInode: browserIdentity.inode,
+      launchToken,
+    });
     state = { ...state, port };
     writeState(paths, state);
     await waitForCdp(port, options);

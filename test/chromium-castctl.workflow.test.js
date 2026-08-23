@@ -19,10 +19,10 @@ function writeExecutable(file, content) {
   fs.chmodSync(file, 0o755);
 }
 
-function makeEnv(home) {
+function makeEnv(home, browserExecutable = process.execPath) {
   const fakeBin = path.join(home, 'bin');
   fs.mkdirSync(fakeBin, { recursive: true });
-  writeExecutable(path.join(fakeBin, 'chromium'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(dummyChromium)} "$@"\n`);
+  writeExecutable(path.join(fakeBin, 'chromium'), `#!/bin/sh\nexec ${JSON.stringify(browserExecutable)} ${JSON.stringify(dummyChromium)} "$@"\n`);
 
   return {
     HOME: home,
@@ -109,9 +109,14 @@ test('dummy Cast backend exercises plugin helper workflow commands', () => {
   }
 });
 
-test('status cleans an orphan launched through the configured browser wrapper', () => {
+test('status cleans a wrapped orphan after its browser executable is replaced', () => {
   const home = tempHome();
-  const env = makeEnv(home);
+  const browserExecutable = path.join(home, 'bin', 'dummy-node');
+  const oldBrowserExecutable = `${browserExecutable}.old`;
+  fs.mkdirSync(path.dirname(browserExecutable), { recursive: true });
+  fs.copyFileSync(process.execPath, browserExecutable);
+  fs.chmodSync(browserExecutable, 0o755);
+  const env = makeEnv(home, browserExecutable);
   const paths = mod.resolvePaths(env);
   let browserPid;
 
@@ -121,6 +126,10 @@ test('status cleans an orphan launched through the configured browser wrapper', 
     const state = mod.readState(paths);
     assert.ok(state && mod.isPidAlive(state.pid));
     browserPid = state.pid;
+    fs.renameSync(browserExecutable, oldBrowserExecutable);
+    fs.copyFileSync(process.execPath, browserExecutable);
+    fs.chmodSync(browserExecutable, 0o755);
+    fs.rmSync(oldBrowserExecutable);
     fs.rmSync(paths.stateFile);
 
     const status = runCastctl(['status', '--waybar'], env);
