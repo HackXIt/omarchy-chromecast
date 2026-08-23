@@ -204,6 +204,22 @@ test('browser launch allows wrapper transitions across the startup timeout', () 
   assert.equal(sinks.stdout.trim(), 'Dummy Living Room');
 });
 
+test('browser startup phases share one timeout deadline', () => {
+  const home = tempHome();
+  const env = {
+    ...makeEnv(home),
+    CHROMIUM_CASTCTL_BROWSER_TIMEOUT_MS: '300',
+    CHROMIUM_CASTCTL_DUMMY_DEVTOOLS_DELAY_MS: '150',
+    CHROMIUM_CASTCTL_DUMMY_CDP_READY_DELAY_MS: '400',
+  };
+  const startedAt = Date.now();
+
+  const sinks = runCastctl(['sinks'], env);
+
+  assert.equal(sinks.status, 1);
+  assert.ok(Date.now() - startedAt < 700);
+});
+
 test('concurrent discovery commands serialize controller state and leave no active browser state', async () => {
   const home = tempHome();
   const env = makeEnv(home);

@@ -14,6 +14,8 @@ const malformedJson = process.env.CHROMIUM_CASTCTL_DUMMY_MALFORMED_JSON === '1';
 const oversizedWsBytes = Number.parseInt(process.env.CHROMIUM_CASTCTL_DUMMY_OVERSIZED_WS_BYTES || '', 10);
 const floodCount = Number.parseInt(process.env.CHROMIUM_CASTCTL_DUMMY_FLOOD_SINKS || '', 10);
 const devToolsDelayMs = Number.parseInt(process.env.CHROMIUM_CASTCTL_DUMMY_DEVTOOLS_DELAY_MS || '', 10);
+const cdpReadyDelayMs = Number.parseInt(process.env.CHROMIUM_CASTCTL_DUMMY_CDP_READY_DELAY_MS || '', 10);
+const startedAt = Date.now();
 let active = false;
 
 if (!Number.isInteger(port) || port < 0) {
@@ -169,6 +171,11 @@ function handleCdpMessage(socket, raw) {
 
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, `http://${address}:${port}`);
+  if (Number.isFinite(cdpReadyDelayMs) && cdpReadyDelayMs > Date.now() - startedAt) {
+    response.writeHead(503, { 'content-type': 'text/plain' });
+    response.end('not ready\n');
+    return;
+  }
   if (url.pathname === '/json/list') {
     writeJson(response, [pageTarget()]);
   } else if (url.pathname === '/json/new') {

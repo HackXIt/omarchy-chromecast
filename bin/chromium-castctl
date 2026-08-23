@@ -268,8 +268,7 @@ function writeBrowserIdentity(paths, identity) {
   writeFileAtomic(paths.browserIdentityFile, `${JSON.stringify(identity, null, 2)}\n`, 0o600);
 }
 
-async function persistLaunchedBrowserIdentity(paths, child, configuredExecutable, launchToken, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
+async function persistLaunchedBrowserIdentity(paths, child, configuredExecutable, launchToken, deadline) {
   while (Date.now() < deadline) {
     const processIdentity = readProcessIdentity(child.pid);
     const args = cmdlineArgs(processIdentity);
@@ -289,7 +288,7 @@ async function persistLaunchedBrowserIdentity(paths, child, configuredExecutable
       return;
     }
     if (!isPidAlive(child.pid)) break;
-    await sleep(10);
+    await sleep(Math.min(10, Math.max(1, deadline - Date.now())));
   }
   throw new Error('Could not verify launched Chromium executable');
 }
@@ -837,16 +836,16 @@ function chromiumLaunchArgs(paths, port, env = process.env) {
 
 async function waitForCdp(port, options = {}) {
   const timeoutMs = options.browserStartTimeoutMs || browserStartTimeoutMs(options.env || process.env);
-  const started = Date.now();
+  const deadline = options.startupDeadline || Date.now() + timeoutMs;
   let lastError;
 
-  while (Date.now() - started < timeoutMs) {
+  while (Date.now() < deadline) {
     try {
-      await fetchTargets(port, { ...options, timeoutMs: 1000 });
+      await fetchTargets(port, { ...options, timeoutMs: Math.max(1, Math.min(1000, deadline - Date.now())) });
       return true;
     } catch (error) {
       lastError = error;
-      await sleep(250);
+      await sleep(Math.min(250, Math.max(1, deadline - Date.now())));
     }
   }
 
@@ -1025,9 +1024,9 @@ function readDevToolsActivePort(paths) {
 
 async function waitForDevToolsActivePort(paths, child, options = {}) {
   const timeoutMs = options.browserStartTimeoutMs || browserStartTimeoutMs(options.env || process.env);
-  const started = Date.now();
+  const deadline = options.startupDeadline || Date.now() + timeoutMs;
   let lastError;
-  while (Date.now() - started < timeoutMs) {
+  while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null || !isPidAlive(child.pid)) {
       throw new Error('Chromium exited before DevTools became available');
     }
@@ -1038,7 +1037,7 @@ async function waitForDevToolsActivePort(paths, child, options = {}) {
       lastError = error;
       if (error.message === 'DevToolsActivePort is unexpectedly large') break;
     }
-    await sleep(100);
+    await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
   }
   throw lastError || new Error('Timed out waiting for Chromium DevToolsActivePort');
 }
@@ -1076,6 +1075,7 @@ async function getReusableBrowser(paths, options = {}) {
 
 async function launchChromium(paths, options = {}) {
   const env = options.env || process.env;
+  const launchDeadline = Date.now() + (options.browserStartTimeoutMs || browserStartTimeoutMs(env));
   const executable = findExecutable(chromiumCommand(env), env);
   if (!executable) {
     throw new CliError('Chromium is not installed or not on PATH. Install Chromium and retry.', 1);
@@ -1123,13 +1123,14 @@ async function launchChromium(paths, options = {}) {
       child,
       configuredExecutable,
       launchToken,
-      options.browserStartTimeoutMs || browserStartTimeoutMs(env),
+      launchDeadline,
     );
-    const port = await waitForDevToolsActivePort(paths, child, options);
+    const startupOptions = { ...options, startupDeadline: launchDeadline };
+    const port = await waitForDevToolsActivePort(paths, child, startupOptions);
     refreshLaunchedBrowserExecutable(paths, child);
     state = { ...state, port };
     writeState(paths, state);
-    await waitForCdp(port, options);
+    await waitForCdp(port, startupOptions);
     await minimizeChromiumWindow(port, options);
   } catch (error) {
     await discardStateBrowser(paths, state);
