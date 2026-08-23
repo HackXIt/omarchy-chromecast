@@ -13,6 +13,7 @@ const failStop = process.env.CHROMIUM_CASTCTL_DUMMY_FAIL_STOP === '1';
 const malformedJson = process.env.CHROMIUM_CASTCTL_DUMMY_MALFORMED_JSON === '1';
 const oversizedWsBytes = Number.parseInt(process.env.CHROMIUM_CASTCTL_DUMMY_OVERSIZED_WS_BYTES || '', 10);
 const floodCount = Number.parseInt(process.env.CHROMIUM_CASTCTL_DUMMY_FLOOD_SINKS || '', 10);
+const devToolsDelayMs = Number.parseInt(process.env.CHROMIUM_CASTCTL_DUMMY_DEVTOOLS_DELAY_MS || '', 10);
 let active = false;
 
 if (!Number.isInteger(port) || port < 0) {
@@ -218,9 +219,11 @@ server.on('upgrade', (request, socket) => {
 server.listen(port, address, () => {
   port = server.address().port;
   if (userDataDir) {
-    const fs = require('node:fs');
-    fs.mkdirSync(userDataDir, { recursive: true });
-    fs.writeFileSync(`${userDataDir}/DevToolsActivePort`, `${port}\n/devtools/browser/dummy\n`, 'utf8');
+    setTimeout(() => {
+      const fs = require('node:fs');
+      fs.mkdirSync(userDataDir, { recursive: true });
+      fs.writeFileSync(`${userDataDir}/DevToolsActivePort`, `${port}\n/devtools/browser/dummy\n`, 'utf8');
+    }, Number.isFinite(devToolsDelayMs) && devToolsDelayMs > 0 ? devToolsDelayMs : 0);
   }
 });
 

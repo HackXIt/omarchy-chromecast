@@ -255,6 +255,8 @@ function readBrowserIdentity(paths) {
     if (typeof identity.browserExecutable !== 'string') return null;
     if (typeof identity.browserDevice !== 'string') return null;
     if (typeof identity.browserInode !== 'string') return null;
+    if (!Number.isInteger(identity.pid) || identity.pid <= 0) return null;
+    if (typeof identity.processStartTime !== 'string' || !identity.processStartTime) return null;
     if (typeof identity.launchToken !== 'string' || !identity.launchToken) return null;
     return identity;
   } catch {
@@ -264,6 +266,51 @@ function readBrowserIdentity(paths) {
 
 function writeBrowserIdentity(paths, identity) {
   writeFileAtomic(paths.browserIdentityFile, `${JSON.stringify(identity, null, 2)}\n`, 0o600);
+}
+
+function executableIsScript(executable) {
+  let fd;
+  try {
+    fd = fs.openSync(executable, fs.constants.O_RDONLY);
+    const prefix = Buffer.alloc(2);
+    return fs.readSync(fd, prefix, 0, prefix.length, 0) === 2 && prefix.toString() === '#!';
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+async function persistLaunchedBrowserIdentity(paths, child, executable, configuredExecutable, launchToken) {
+  const scriptWrapper = executableIsScript(executable);
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline) {
+    const processIdentity = readProcessIdentity(child.pid);
+    const args = cmdlineArgs(processIdentity);
+    const wrapperStillRunning = scriptWrapper
+      && (args.includes(executable) || args.includes(configuredExecutable));
+    const browserExecutable = processExecutable(child.pid);
+    const browserIdentity = processExecutableIdentity(child.pid);
+    if (processIdentity?.startTime
+      && args.includes(`--chromium-castctl-launch-token=${launchToken}`)
+      && !wrapperStillRunning
+      && browserExecutable
+      && browserIdentity) {
+      writeBrowserIdentity(paths, {
+        configuredExecutable,
+        browserExecutable,
+        browserDevice: browserIdentity.device,
+        browserInode: browserIdentity.inode,
+        pid: child.pid,
+        processStartTime: processIdentity.startTime,
+        launchToken,
+      });
+      return;
+    }
+    if (!isPidAlive(child.pid)) break;
+    await sleep(10);
+  }
+  throw new Error('Could not verify launched Chromium executable');
 }
 
 function processIsProfileBrowser(identity, paths, env = process.env) {
@@ -281,6 +328,8 @@ function processIsProfileBrowser(identity, paths, env = process.env) {
   const actualIdentity = processExecutableIdentity(identity.pid);
   return Boolean(launched
     && launched.configuredExecutable === configuredExecutable
+    && launched.pid === identity.pid
+    && launched.processStartTime === String(identity.startTime)
     && actualIdentity
     && launched.browserDevice === actualIdentity.device
     && launched.browserInode === actualIdentity.inode
@@ -1078,17 +1127,8 @@ async function launchChromium(paths, options = {}) {
   };
 
   try {
+    await persistLaunchedBrowserIdentity(paths, child, executable, configuredExecutable, launchToken);
     const port = await waitForDevToolsActivePort(paths, child, options);
-    const browserExecutable = processExecutable(child.pid);
-    const browserIdentity = processExecutableIdentity(child.pid);
-    if (!browserExecutable || !browserIdentity) throw new Error('Could not verify launched Chromium executable');
-    writeBrowserIdentity(paths, {
-      configuredExecutable,
-      browserExecutable,
-      browserDevice: browserIdentity.device,
-      browserInode: browserIdentity.inode,
-      launchToken,
-    });
     state = { ...state, port };
     writeState(paths, state);
     await waitForCdp(port, options);

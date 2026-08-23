@@ -60,6 +60,15 @@ function runCastctlAsync(args, env) {
   });
 }
 
+async function waitForFile(file, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(file)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${file}`);
+}
+
 test('dummy Cast backend exercises plugin helper workflow commands', () => {
   const home = tempHome();
   const env = makeEnv(home);
@@ -138,6 +147,42 @@ test('status cleans a wrapped orphan after its browser executable is replaced', 
     assert.equal(mod.isPidAlive(browserPid), false);
     assert.equal(mod.readState(paths), null);
   } finally {
+    if (browserPid && mod.isPidAlive(browserPid)) {
+      try {
+        process.kill(-browserPid, 'SIGKILL');
+      } catch {
+        process.kill(browserPid, 'SIGKILL');
+      }
+    }
+  }
+});
+
+test('status cleans a wrapped orphan after controller startup is interrupted', async () => {
+  const home = tempHome();
+  const env = { ...makeEnv(home), CHROMIUM_CASTCTL_DUMMY_DEVTOOLS_DELAY_MS: '2000' };
+  const paths = mod.resolvePaths(env);
+  const controller = childProcess.spawn(process.execPath, [bin, 'start', 'Dummy Living Room'], {
+    env,
+    stdio: 'ignore',
+  });
+  let browserPid;
+
+  try {
+    await waitForFile(paths.browserIdentityFile);
+    const launched = JSON.parse(fs.readFileSync(paths.browserIdentityFile, 'utf8'));
+    browserPid = launched.pid;
+    assert.equal(mod.readState(paths), null);
+    assert.equal(mod.isPidAlive(browserPid), true);
+
+    controller.kill('SIGKILL');
+    await new Promise((resolve) => controller.once('exit', resolve));
+
+    const status = runCastctl(['status', '--waybar'], env);
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(JSON.parse(status.stdout).class, 'idle');
+    assert.equal(mod.isPidAlive(browserPid), false);
+  } finally {
+    if (controller.exitCode === null && controller.signalCode === null) controller.kill('SIGKILL');
     if (browserPid && mod.isPidAlive(browserPid)) {
       try {
         process.kill(-browserPid, 'SIGKILL');
