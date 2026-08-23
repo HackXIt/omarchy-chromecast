@@ -502,6 +502,42 @@ test('status cleanup clears unverified stale same-profile browser state without 
   }
 });
 
+test('status cleanup terminates same-profile controller processes when state is missing', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const child = childProcess.spawn(process.execPath, [
+    '-e',
+    'setInterval(() => {}, 1000)',
+    '--',
+    `--user-data-dir=${paths.profileDir}`,
+    '--remote-debugging-address=127.0.0.1',
+    '--remote-debugging-port=0',
+    '--enable-features=MediaRouter',
+  ], {
+    detached: true,
+    stdio: 'ignore',
+  });
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(mod.readState(paths), null);
+    assert.equal(mod.isPidAlive(child.pid), true);
+
+    const status = await mod.getStatus(paths, { timeoutMs: 1, waitMs: 1 });
+
+    assert.equal(status.browser, false);
+    assert.equal(await waitForChildExit(child), true);
+    assert.equal(mod.readState(paths), null);
+  } finally {
+    if (mod.isPidAlive(child.pid)) {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        process.kill(child.pid, 'SIGKILL');
+      }
+    }
+  }
+});
+
 test('failed browser launch clears the written state file', async () => {
   const paths = mod.resolvePaths({ HOME: tempHome() });
   let stderr = '';
