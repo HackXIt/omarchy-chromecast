@@ -1279,16 +1279,16 @@ function sinkNameKey(name) {
   return String(name || '').toLocaleLowerCase();
 }
 
-function sinkIdentityKey(sink, fallback) {
-  return sink.id ? `id:${sink.id}` : `unknown:${fallback}`;
-}
-
 function distinctSinksByIdentity(sinks) {
+  const normalized = normalizeSinkList(sinks || []);
+  const namesWithIdentity = new Set(normalized.filter((sink) => sink.id).map((sink) => sinkNameKey(sink.name)));
   const distinct = [];
   const identities = new Set();
-  for (const sink of normalizeSinkList(sinks || [])) {
-    const key = sinkIdentityKey(sink, distinct.length);
-    if (sink.id && identities.has(key)) continue;
+  for (const sink of normalized) {
+    const nameKey = sinkNameKey(sink.name);
+    if (!sink.id && namesWithIdentity.has(nameKey)) continue;
+    const key = sink.id ? `id:${sink.id}` : `unknown:${nameKey}`;
+    if (identities.has(key)) continue;
     identities.add(key);
     distinct.push(sink);
   }

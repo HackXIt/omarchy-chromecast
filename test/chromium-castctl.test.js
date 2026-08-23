@@ -779,10 +779,17 @@ test('CLI status --waybar is valid idle JSON with an empty temp HOME', () => {
 });
 
 
-test('sink matching rejects duplicate friendly names instead of choosing the first', () => {
-  assert.throws(
-    () => mod.matchSink([{ name: 'Trusted TV' }, { name: 'Trusted TV' }], 'Trusted TV'),
-    /Ambiguous Chromecast target name: Trusted TV/,
+test('sink matching keeps duplicate id-less advertisements usable', () => {
+  assert.deepEqual(
+    mod.matchSink([{ name: 'Trusted TV' }, { name: 'Trusted TV' }], 'Trusted TV'),
+    { name: 'Trusted TV' },
+  );
+});
+
+test('sink matching prefers established identity over an id-less duplicate', () => {
+  assert.deepEqual(
+    mod.matchSink([{ name: 'Trusted TV' }, { name: 'Trusted TV', id: 'receiver-a' }], 'Trusted TV'),
+    { name: 'Trusted TV', id: 'receiver-a', source: 'chromium' },
   );
 });
 
