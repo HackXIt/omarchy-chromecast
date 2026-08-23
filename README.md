@@ -13,12 +13,15 @@ This project was vibe-coded from the practical need to have a simple "cast this 
 ## Showcase
 
 <p align="center">
+  <img src="assets/screenshots/casting-active.png" alt="Chromecast widget active casting state" width="360">
+</p>
+
+<p align="center">
   <img src="assets/screenshots/screen-selection.png" alt="Selecting an Omarchy screen or output to cast" width="820">
 </p>
 
 <p align="center">
   <img src="assets/screenshots/idle.png" alt="Chromecast widget idle state with available target" width="360">
-  <img src="assets/screenshots/casting-active.png" alt="Chromecast widget active casting state" width="360">
 </p>
 
 <p align="center">
