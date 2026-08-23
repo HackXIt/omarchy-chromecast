@@ -442,7 +442,7 @@ test('browser launch honors the browser startup timeout separately from the CDP 
     {
       HOME: home,
       PATH: fakeBin,
-      CHROMIUM_CASTCTL_CDP_TIMEOUT_MS: '1',
+      CHROMIUM_CASTCTL_CDP_TIMEOUT_MS: '100',
       CHROMIUM_CASTCTL_BROWSER_TIMEOUT_MS: '800',
       CHROMIUM_CASTCTL_SINK_WAIT_MS: '1',
     },
