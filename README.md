@@ -322,9 +322,11 @@ node --check bin/chromium-castctl
 bash -n install.sh scripts/validate-plugin.sh
 ```
 
-The GitHub Actions workflow runs these checks on pushes and pull requests. Omarchy Marketplace verification is separate: the marketplace must scan and record the exact listed commit before it can display `Verified`.
+The GitHub Actions workflow runs these checks on pushes and pull requests. The Node test suite starts a dependency-free dummy Chromium/CDP Cast backend and exercises the same helper workflows the Quickshell plugin uses: target discovery, start, active status, stop, and idle status.
 
-No npm dependencies are required.
+Omarchy Marketplace verification is separate: the marketplace must scan and record the exact listed commit before it can display `Verified`.
+
+No npm dependencies are required. Full visual Quickshell/Omarchy shell interaction still needs manual validation on an Omarchy desktop.
 
 For bugs and focused feature requests, use [GitHub Issues](https://github.com/HackXIt/omarchy-chromecast/issues). Keep pull requests small and include the validation commands you ran.
 

@@ -48,7 +48,7 @@ jobs:
         run: node --test
 
       - name: Check helper syntax
-        run: node --check bin/chromium-castctl
+        run: node --check bin/chromium-castctl test/fixtures/dummy-chromium-cast
 
       - name: Check shell script syntax
         run: bash -n install.sh scripts/validate-plugin.sh
