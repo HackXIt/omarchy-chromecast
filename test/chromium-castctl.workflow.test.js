@@ -220,7 +220,6 @@ exec -a chromium-wrapper-initializing /bin/bash -c 'sleep 1; mapfile -t args < <
 
     controller.kill('SIGKILL');
     await new Promise((resolve) => controller.once('exit', resolve));
-    await new Promise((resolve) => setTimeout(resolve, 1200));
 
     const status = runCastctl(['status', '--waybar'], env);
     assert.equal(status.status, 0, status.stderr);
