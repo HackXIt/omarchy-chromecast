@@ -19,6 +19,7 @@ const MAX_CDP_HTTP_RESPONSE_BYTES = 1024 * 1024;
 const MAX_CDP_WS_MESSAGE_BYTES = 1024 * 1024;
 const MAX_SINKS = 64;
 const MAX_SINK_NAME_CHARS = 160;
+const MAX_SINK_ID_CHARS = 256;
 const MAX_TERMINAL_TEXT_CHARS = 1000;
 const DEFAULT_LOCK_TIMEOUT_MS = 30000;
 const LOCK_STALE_MS = 120000;
@@ -459,18 +460,22 @@ function parseAvahiBrowseOutput(output) {
     if (!line.includes('_googlecast._tcp')) continue;
 
     const quoted = line.matchAll(/"((?:\\.|[^"])*)"/g);
+    let receiverId = null;
+    let name = null;
     for (const match of quoted) {
       const token = match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-      if (!token.startsWith('fn=')) continue;
-      const name = token.slice(3).trim();
-      const normalized = normalizeSink({ name, source: 'avahi' });
-      if (!normalized) continue;
-      if (sinks.length >= MAX_SINKS) throw new CliError(`More than ${MAX_SINKS} Chromecast targets were reported`, 1);
-      sinks.push(normalized);
+      if (token.startsWith('id=')) receiverId = token.slice(3).trim();
+      if (token.startsWith('fn=')) name = token.slice(3).trim();
     }
+    if (!name) continue;
+    const normalized = normalizeSink({ name, id: receiverId, source: 'avahi' });
+    if (!normalized) continue;
+    if (normalized.id && sinks.some((sink) => sink.id === normalized.id)) continue;
+    if (sinks.length >= MAX_SINKS) throw new CliError(`More than ${MAX_SINKS} Chromecast targets were reported`, 1);
+    sinks.push(normalized);
   }
 
-  return sinks;
+  return distinctSinksByIdentity(sinks);
 }
 
 function discoverAvahiSinks(options = {}) {
@@ -1235,7 +1240,18 @@ function normalizeSink(sink) {
   if (!name) return null;
   if (name.length > MAX_SINK_NAME_CHARS) return null;
   if (CONTROL_OR_BIDI_PATTERN.test(name)) return null;
-  return { ...sink, name };
+  const rawId = sink.id === undefined || sink.id === null ? '' : String(sink.id).trim();
+  const id = rawId && rawId.length <= MAX_SINK_ID_CHARS && !CONTROL_OR_BIDI_PATTERN.test(rawId) ? rawId : null;
+  const normalized = { ...sink, name };
+  if (id) {
+    normalized.id = id;
+    normalized.source = sink.source === 'avahi' ? 'avahi' : 'chromium';
+  } else {
+    delete normalized.id;
+    if (sink.source === 'avahi') normalized.source = 'avahi';
+    else delete normalized.source;
+  }
+  return normalized;
 }
 
 function normalizeSinkList(sinks) {
@@ -1263,8 +1279,24 @@ function sinkNameKey(name) {
   return String(name || '').toLocaleLowerCase();
 }
 
+function sinkIdentityKey(sink, fallback) {
+  return sink.id ? `id:${sink.id}` : `unknown:${fallback}`;
+}
+
+function distinctSinksByIdentity(sinks) {
+  const distinct = [];
+  const identities = new Set();
+  for (const sink of normalizeSinkList(sinks || [])) {
+    const key = sinkIdentityKey(sink, distinct.length);
+    if (sink.id && identities.has(key)) continue;
+    identities.add(key);
+    distinct.push(sink);
+  }
+  return distinct;
+}
+
 function groupedSinkRows(sinks) {
-  const normalized = normalizeSinkList(sinks || []);
+  const normalized = distinctSinksByIdentity(sinks || []);
   const groups = new Map();
   for (const sink of normalized) {
     const key = sinkNameKey(sink.name);
@@ -1277,13 +1309,18 @@ function groupedSinkRows(sinks) {
     const name = group[0].name;
     const duplicateCount = group.length;
     const ambiguous = duplicateCount > 1;
-    return {
+    const row = {
       name,
       displayName: ambiguous ? `${stripControlsForDisplay(name, MAX_SINK_NAME_CHARS)} (ambiguous: ${duplicateCount} devices)` : stripControlsForDisplay(name, MAX_SINK_NAME_CHARS),
       startable: !ambiguous,
       ambiguous,
       duplicateCount,
     };
+    const receivers = group
+      .filter((sink) => sink.id)
+      .map((sink) => ({ id: sink.id, source: sink.source }));
+    if (receivers.length > 0) row.receivers = receivers;
+    return row;
   });
 }
 
@@ -1304,7 +1341,7 @@ function matchSink(sinks, requestedName) {
     throw new CliError('Unsafe Chromecast target name; refusing to start desktop mirroring.', 1);
   }
 
-  const normalized = normalizeSinkList(sinks || []);
+  const normalized = distinctSinksByIdentity(sinks || []);
   const exact = normalized.filter((sink) => sink.name === requested);
   if (exact.length > 1) throw new CliError(`Ambiguous Chromecast target name: ${requested}. Rename one receiver or choose a unique target.`, 1);
   if (exact.length === 1) return exact[0];

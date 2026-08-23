@@ -611,8 +611,16 @@ test('sink matching is exact first and then case-insensitive', () => {
 test('Avahi Google Cast output parses sink names from TXT fn records', () => {
   const output = `+;wlan0;IPv4;Chromecast-fb8;_googlecast._tcp;local\n=;wlan0;IPv4;Chromecast-fb8;_googlecast._tcp;local;fb8.local;10.1.1.47;8009;"id=fb8" "md=Chromecast" "fn=Wohnzimmer" "rs="\n=;wlan0;IPv4;Other;_googlecast._tcp;local;other.local;10.1.1.48;8009;"id=other" "fn=Kitchen TV"\n`;
   assert.deepEqual(mod.parseAvahiBrowseOutput(output), [
-    { name: 'Wohnzimmer', source: 'avahi' },
-    { name: 'Kitchen TV', source: 'avahi' },
+    { name: 'Wohnzimmer', id: 'fb8', source: 'avahi' },
+    { name: 'Kitchen TV', id: 'other', source: 'avahi' },
+  ]);
+});
+
+test('Avahi discovery deduplicates repeated advertisements by receiver identity', () => {
+  const output = `=;wlan0;IPv4;Chromecast-fb8;_googlecast._tcp;local;fb8.local;10.1.1.47;8009;"id=fb8" "fn=Living Room"\n=;wlan0;IPv6;Chromecast-fb8;_googlecast._tcp;local;fb8.local;fe80::1;8009;"id=fb8" "fn=Living Room"\n=;wlan0;IPv4;Chromecast-other;_googlecast._tcp;local;other.local;10.1.1.48;8009;"id=other" "fn=Living Room"\n`;
+  assert.deepEqual(mod.parseAvahiBrowseOutput(output), [
+    { name: 'Living Room', id: 'fb8', source: 'avahi' },
+    { name: 'Living Room', id: 'other', source: 'avahi' },
   ]);
 });
 
@@ -1061,6 +1069,20 @@ test('sinks --json marks duplicate friendly names as ambiguous and not startable
       startable: false,
       ambiguous: true,
       duplicateCount: 2,
+      receivers: [
+        { id: 'a', source: 'chromium' },
+        { id: 'b', source: 'chromium' },
+      ],
     },
   ]);
+});
+
+test('duplicate Chromium advertisements with one identity remain startable', () => {
+  const sinks = [
+    { name: 'Trusted TV', id: 'same-receiver' },
+    { name: 'Trusted TV', id: 'same-receiver' },
+  ];
+  assert.deepEqual(mod.matchSink(sinks, 'Trusted TV'), {
+    name: 'Trusted TV', id: 'same-receiver', source: 'chromium',
+  });
 });
