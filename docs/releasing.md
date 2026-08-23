@@ -42,7 +42,3 @@ Pushing the tag runs `.github/workflows/release.yml`. The workflow validates the
 ## Omarchy Marketplace updates
 
 Marketplace publication and verification are not part of the GitHub Release workflow. If this plugin is listed, request verification for the exact merged commit only after the release candidate and public release policy are approved. Treat marketplace update requests as a separate, explicit publishing step.
-
-## PR #31 release path
-
-PR #31 is already merged after `v0.1.1`. Its security hardening and lifecycle fixes are recorded under `CHANGELOG.md` `## [Unreleased]`; use those notes as the starting point for the next release-prep PR. A patch release is the default fit for compatible hardening, but confirm the final version before tagging.
