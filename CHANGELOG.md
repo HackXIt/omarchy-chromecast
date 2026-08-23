@@ -6,6 +6,18 @@ The release workflow expects a versioned section named `## [X.Y.Z]` for tag `vX.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-23
+
+### Changed
+
+- Refactored the dependency-free `chromium-castctl` helper into focused lifecycle, CDP, Cast control, discovery, state, formatting, and command modules while preserving user-facing behavior. ([PR #32](https://github.com/HackXIt/omarchy-chromecast/pull/32))
+- Documented the helper architecture and made private state, process identity, loopback CDP, receiver normalization, and Cast operation security boundaries easier to review. ([PR #32](https://github.com/HackXIt/omarchy-chromecast/pull/32))
+- Added structured sentinel error classification coverage across CLI and Chromium lifecycle boundaries so helper failures stay consistent and testable. ([PR #32](https://github.com/HackXIt/omarchy-chromecast/pull/32))
+
+### Release process
+
+- Made future tag-driven release publishing more reliable by checking out the repository before the GitHub Release publish step. ([PR #35](https://github.com/HackXIt/omarchy-chromecast/pull/35))
+
 ## [0.1.2] - 2026-08-23
 
 ### Security
