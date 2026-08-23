@@ -283,9 +283,10 @@ Run tests with Node's built-in test runner and validate the plugin manifest:
 ```bash
 ./scripts/validate-plugin.sh .
 ./scripts/check-actions-pinned.sh
+./scripts/release-notes.sh "v$(jq -r '.version' manifest.json)" >/dev/null
 node --test
 node --check bin/chromium-castctl test/fixtures/dummy-chromium-cast
-bash -n install.sh scripts/validate-plugin.sh scripts/check-actions-pinned.sh
+bash -n install.sh scripts/validate-plugin.sh scripts/check-actions-pinned.sh scripts/release-notes.sh
 ```
 
 The GitHub Actions workflow runs these checks on pushes and pull requests. The Node test suite starts a dependency-free dummy Chromium/CDP Cast backend and exercises the same helper workflows the Quickshell plugin uses: target discovery, start, active status, stop, and idle status.
@@ -298,13 +299,6 @@ For bugs and focused feature requests, use [GitHub Issues](https://github.com/Ha
 
 ## Releases
 
-Releases are tag-driven. The tag version must match `manifest.json`.
+Releases are tag-driven. The tag version must match `manifest.json`, and the same version must have a matching `CHANGELOG.md` section so GitHub Releases use curated public notes.
 
-```bash
-git switch main
-git pull --ff-only upstream main
-git tag -a v0.1.0 -m "v0.1.0"
-git push upstream v0.1.0
-```
-
-Pushing a `v*.*.*` tag runs the release workflow, validates the plugin/helper, and publishes a GitHub Release with source archives.
+See [docs/releasing.md](docs/releasing.md) for the release-prep PR, tag, GitHub Release, and Omarchy Marketplace update boundaries.
