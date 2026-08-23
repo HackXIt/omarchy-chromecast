@@ -174,35 +174,8 @@ Manual integration after validating the CLI:
 
 1. Back up `~/.config/waybar/config.jsonc` and `~/.config/waybar/style.css`.
 2. Add `custom/chromecast` to the desired Waybar module list.
-3. Add the module config above to the Waybar config.
-4. Add this CSS so the Chromecast glyph uses the local OTF while labels still fall back to the normal Waybar font:
-
-```css
-@keyframes chromecast-busy {
-  to {
-    color: #e0af68;
-  }
-}
-
-#custom-chromecast {
-  min-width: 12px;
-  margin-right: 13px;
-  font-family: "Chromium Castctl Icons", "JetBrainsMono Nerd Font";
-}
-
-#custom-chromecast.busy {
-  animation-name: chromecast-busy;
-  animation-duration: 0.7s;
-  animation-timing-function: ease-in-out;
-  animation-iteration-count: infinite;
-  animation-direction: alternate;
-}
-
-#custom-chromecast.active {
-  color: #9ece6a;
-}
-```
-
+3. Copy the module config from `waybar-module.jsonc` into the Waybar config.
+4. Add the styles from `waybar-style.css` to the Waybar stylesheet.
 5. Restart Waybar:
 
 ```bash
