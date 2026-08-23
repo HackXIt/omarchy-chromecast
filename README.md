@@ -263,11 +263,13 @@ If the isolated headless browser is running but you are not casting, close it wi
 chromium-castctl quit-browser
 ```
 
-If state becomes stale, the next command removes stale state automatically. To reset manually:
+If state becomes stale, the next controller command removes stale state and cleans up any verified Chromium process using the isolated profile. `doctor` reports stale, extra, or orphaned control-browser processes without launching Chromium. To reset manually:
 
 ```bash
 rm -f ~/.local/state/chromium-castctl/state.json
 ```
+
+Removing this file while the control browser is running temporarily orphans that process; the next controller command detects and closes it.
 
 To remove the isolated Chromium profile and force a clean control browser:
 
