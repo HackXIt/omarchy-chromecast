@@ -269,14 +269,28 @@ function writeBrowserIdentity(paths, identity) {
 }
 
 async function persistLaunchedBrowserIdentity(paths, child, configuredExecutable, launchToken, deadline) {
+  let provisionalIdentity = null;
   while (Date.now() < deadline) {
     const processIdentity = readProcessIdentity(child.pid);
     const args = cmdlineArgs(processIdentity);
     const browserExecutable = processExecutable(child.pid);
     const browserIdentity = processExecutableIdentity(child.pid);
+    if (!provisionalIdentity && processIdentity?.startTime && browserExecutable && browserIdentity) {
+      provisionalIdentity = {
+        configuredExecutable,
+        browserExecutable,
+        browserDevice: browserIdentity.device,
+        browserInode: browserIdentity.inode,
+        pid: child.pid,
+        processStartTime: processIdentity.startTime,
+        launchToken,
+      };
+      writeBrowserIdentity(paths, provisionalIdentity);
+    }
     if (processIdentity?.startTime
       && args.includes(`--chromium-castctl-launch-token=${launchToken}`)) {
       writeBrowserIdentity(paths, {
+        ...provisionalIdentity,
         configuredExecutable,
         browserExecutable: browserExecutable || null,
         browserDevice: browserIdentity?.device || null,

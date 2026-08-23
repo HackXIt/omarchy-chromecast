@@ -194,6 +194,50 @@ test('status cleans a wrapped orphan after controller startup is interrupted', a
   }
 });
 
+test('startup identity survives a wrapper hiding its launch arguments', async () => {
+  const home = tempHome();
+  const env = makeEnv(home);
+  const fakeBin = path.join(home, 'bin');
+  const wrapper = path.join(fakeBin, 'chromium');
+  writeExecutable(wrapper, `#!/bin/bash
+saved_args=$(printf '%s\\n' "$@" | base64 -w0)
+export saved_args
+exec -a chromium-wrapper-initializing /bin/bash -c 'sleep 1; mapfile -t args < <(printf %s "$saved_args" | base64 -d); exec ${JSON.stringify(process.execPath)} ${JSON.stringify(dummyChromium)} "\${args[@]}"'
+`);
+  const paths = mod.resolvePaths(env);
+  const controller = childProcess.spawn(process.execPath, [bin, 'start', 'Dummy Living Room'], {
+    env,
+    stdio: 'ignore',
+  });
+  let browserPid;
+
+  try {
+    await waitForFile(paths.browserIdentityFile);
+    const launched = JSON.parse(fs.readFileSync(paths.browserIdentityFile, 'utf8'));
+    browserPid = launched.pid;
+    assert.equal(mod.readState(paths), null);
+    assert.equal(mod.isPidAlive(browserPid), true);
+
+    controller.kill('SIGKILL');
+    await new Promise((resolve) => controller.once('exit', resolve));
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    const status = runCastctl(['status', '--waybar'], env);
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(JSON.parse(status.stdout).class, 'idle');
+    assert.equal(mod.isPidAlive(browserPid), false);
+  } finally {
+    if (controller.exitCode === null && controller.signalCode === null) controller.kill('SIGKILL');
+    if (browserPid && mod.isPidAlive(browserPid)) {
+      try {
+        process.kill(-browserPid, 'SIGKILL');
+      } catch {
+        process.kill(browserPid, 'SIGKILL');
+      }
+    }
+  }
+});
+
 test('browser launch allows wrapper transitions across the startup timeout', () => {
   const home = tempHome();
   const env = makeEnv(home, process.execPath, 1.2);
