@@ -951,6 +951,35 @@ test('an old lock remains owned by its live verified process', async () => {
   assert.equal(JSON.parse(fs.readFileSync(path.join(paths.lockDir, 'owner.json'), 'utf8')).nonce, 'existing-owner');
 });
 
+test('stale lock takeover recovers a prior quarantine safely', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  fs.mkdirSync(paths.lockDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(paths.lockDir, 'owner.json'), JSON.stringify({
+    pid: 2147483647,
+    nonce: 'dead-owner',
+  }));
+  fs.mkdirSync(`${paths.lockDir}.stale`, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(`${paths.lockDir}.stale`, 'owner.json'), JSON.stringify({
+    pid: 2147483647,
+    nonce: 'earlier-dead-owner',
+  }));
+  let stderr = '';
+
+  const code = await mod.run(
+    ['status', '--waybar'],
+    {
+      stdout: { write: () => {} },
+      stderr: { write: (chunk) => { stderr += chunk; } },
+    },
+    { ...process.env, HOME: paths.home, CHROMIUM_CASTCTL_LOCK_TIMEOUT_MS: '100' },
+    { paths },
+  );
+
+  assert.equal(code, 0, stderr);
+  assert.equal(fs.existsSync(paths.lockDir), false);
+  assert.equal(fs.existsSync(`${paths.lockDir}.stale`), false);
+});
+
 test('status does not inspect or clean state owned by another locked command', async () => {
   const paths = mod.resolvePaths({ HOME: tempHome() });
   fs.mkdirSync(paths.lockDir, { recursive: true, mode: 0o700 });

@@ -246,6 +246,7 @@ async function acquireStateLock(paths, options = {}) {
   const env = options.env || process.env;
   const timeoutMs = options.lockTimeoutMs ?? lockTimeoutMs(env);
   const deadline = Date.now() + timeoutMs;
+  const staleLockDir = `${paths.lockDir}.stale`;
   ensureDir(paths.stateDir);
 
   while (true) {
@@ -263,7 +264,13 @@ async function acquireStateLock(paths, options = {}) {
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
       if (lockIsStale(paths)) {
-        fs.rmSync(paths.lockDir, { recursive: true, force: true });
+        try {
+          fs.renameSync(paths.lockDir, staleLockDir);
+        } catch (renameError) {
+          if (renameError.code === 'ENOENT') continue;
+          if (renameError.code !== 'EEXIST' && renameError.code !== 'ENOTEMPTY') throw renameError;
+          if (lockIsStale(paths)) fs.rmSync(staleLockDir, { recursive: true, force: true });
+        }
         continue;
       }
       if (Date.now() >= deadline) {
@@ -278,6 +285,7 @@ function releaseStateLock(paths, owner) {
   const current = readLockOwner(paths);
   if (!current || current.nonce !== owner.nonce || current.pid !== owner.pid) return;
   fs.rmSync(paths.lockDir, { recursive: true, force: true });
+  fs.rmSync(`${paths.lockDir}.stale`, { recursive: true, force: true });
 }
 
 async function withStateLock(paths, options, callback) {
