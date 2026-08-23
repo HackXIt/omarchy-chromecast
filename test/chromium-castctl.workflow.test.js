@@ -109,6 +109,36 @@ test('dummy Cast backend exercises plugin helper workflow commands', () => {
   }
 });
 
+test('status cleans an orphan launched through the configured browser wrapper', () => {
+  const home = tempHome();
+  const env = makeEnv(home);
+  const paths = mod.resolvePaths(env);
+  let browserPid;
+
+  try {
+    const start = runCastctl(['start', 'Dummy Living Room'], env);
+    assert.equal(start.status, 0, start.stderr);
+    const state = mod.readState(paths);
+    assert.ok(state && mod.isPidAlive(state.pid));
+    browserPid = state.pid;
+    fs.rmSync(paths.stateFile);
+
+    const status = runCastctl(['status', '--waybar'], env);
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(JSON.parse(status.stdout).class, 'idle');
+    assert.equal(mod.isPidAlive(browserPid), false);
+    assert.equal(mod.readState(paths), null);
+  } finally {
+    if (browserPid && mod.isPidAlive(browserPid)) {
+      try {
+        process.kill(-browserPid, 'SIGKILL');
+      } catch {
+        process.kill(browserPid, 'SIGKILL');
+      }
+    }
+  }
+});
+
 test('concurrent discovery commands serialize controller state and leave no active browser state', async () => {
   const home = tempHome();
   const env = makeEnv(home);

@@ -58,6 +58,7 @@ function resolvePaths(env = process.env) {
     cacheDir,
     profileDir: path.join(dataDir, 'chromium-profile'),
     stateFile: path.join(stateDir, 'state.json'),
+    browserIdentityFile: path.join(stateDir, 'browser-identity.json'),
     uiStateFile: path.join(stateDir, 'ui-state.json'),
     lockDir: path.join(stateDir, 'operation.lock'),
     logFile: path.join(cacheDir, 'chromium.log'),
@@ -233,11 +234,39 @@ function configuredBrowserExecutable(env = process.env) {
   }
 }
 
+function readBrowserIdentity(paths) {
+  try {
+    const identity = JSON.parse(fs.readFileSync(paths.browserIdentityFile, 'utf8'));
+    if (!identity || typeof identity !== 'object') return null;
+    if (typeof identity.configuredExecutable !== 'string') return null;
+    if (typeof identity.browserExecutable !== 'string') return null;
+    if (typeof identity.launchToken !== 'string' || !identity.launchToken) return null;
+    return identity;
+  } catch {
+    return null;
+  }
+}
+
+function writeBrowserIdentity(paths, identity) {
+  writeFileAtomic(paths.browserIdentityFile, `${JSON.stringify(identity, null, 2)}\n`, 0o600);
+}
+
 function processIsProfileBrowser(identity, paths, env = process.env) {
   const args = cmdlineArgs(identity);
-  return args.includes(`--user-data-dir=${paths.profileDir}`)
-    && !args.some((arg) => arg.startsWith('--type='))
-    && processExecutable(identity.pid) === configuredBrowserExecutable(env);
+  if (!args.includes(`--user-data-dir=${paths.profileDir}`) || args.some((arg) => arg.startsWith('--type='))) {
+    return false;
+  }
+
+  const actualExecutable = processExecutable(identity.pid);
+  const configuredExecutable = configuredBrowserExecutable(env);
+  if (!actualExecutable || !configuredExecutable) return false;
+  if (actualExecutable === configuredExecutable) return true;
+
+  const launched = readBrowserIdentity(paths);
+  return Boolean(launched
+    && launched.configuredExecutable === configuredExecutable
+    && launched.browserExecutable === actualExecutable
+    && args.includes(`--chromium-castctl-launch-token=${launched.launchToken}`));
 }
 
 function findProfileBrowserProcesses(paths, env = process.env) {
@@ -996,7 +1025,9 @@ async function launchChromium(paths, options = {}) {
 
   prepareFreshProfile(paths);
   ensureDir(paths.profileDir);
-  const args = chromiumLaunchArgs(paths, 0, env);
+  const launchToken = randomToken();
+  const args = [...chromiumLaunchArgs(paths, 0, env), `--chromium-castctl-launch-token=${launchToken}`];
+  const configuredExecutable = fs.realpathSync(executable);
   const logFd = openPrivateAppend(paths.logFile);
   let child;
   try {
@@ -1030,6 +1061,9 @@ async function launchChromium(paths, options = {}) {
 
   try {
     const port = await waitForDevToolsActivePort(paths, child, options);
+    const browserExecutable = processExecutable(child.pid);
+    if (!browserExecutable) throw new Error('Could not verify launched Chromium executable');
+    writeBrowserIdentity(paths, { configuredExecutable, browserExecutable, launchToken });
     state = { ...state, port };
     writeState(paths, state);
     await waitForCdp(port, options);
