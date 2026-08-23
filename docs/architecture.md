@@ -26,10 +26,12 @@ flowchart TD
   CMD --> LOCK[state.js operation lock]
   LOCK --> DISC[discovery.js Avahi hints]
   LOCK --> CHR[chromium.js controller lifecycle]
+  LOCK --> CAST[cast.js Cast operations]
   CHR --> CDP[cdp.js loopback CDP]
-  CDP --> CAST[cast.js Cast.* methods]
-  CAST --> PORTAL[Wayland/Hyprland portal + PipeWire]
-  CAST --> STATE[state.json / ui-state.json]
+  CAST --> CDP
+  CDP --> BACKEND[Chromium Cast backend]
+  BACKEND --> PORTAL[Wayland/Hyprland portal + PipeWire]
+  CMD --> STATE[state.json / ui-state.json]
   STATE --> FORMAT[format.js status JSON/text]
   FORMAT --> UI
 ```
@@ -90,7 +92,7 @@ flowchart TD
   Cleanup --> StopFail[stop failure: still attempt local cleanup]
 ```
 
-State files are private to the user under XDG data/state/cache roots. Atomic writes go through `fs-private.js`, directories are created with private permissions, and unsafe non-directory/symlink paths are refused where the helper creates private directories. Locks are stale only when their owner is gone or no longer has the recorded process start time.
+State files are private to the user under XDG data/state/cache roots. Atomic writes go through `fs-private.js`, directories are created with private permissions, and unsafe non-directory/symlink paths are refused where the helper creates private directories. Locks with a verified owner are stale only when that process is gone or no longer has the recorded start time; incomplete or invalid lock records are reclaimed only after the stale timeout.
 
 Security-relevant parse and lifecycle errors use explicit error classes/codes from `errors.js` rather than message-text matching. For example, an oversized `DevToolsActivePort` file is classified as `cdp_devtools_active_port_too_large`, and wait logic branches on that sentinel code.
 
