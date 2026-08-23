@@ -4,6 +4,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 - Validate plugin/helper changes with `./scripts/validate-plugin.sh .`, `./scripts/check-actions-pinned.sh`, `./scripts/release-notes.sh "v$(jq -r '.version' manifest.json)" >/dev/null`, `bash -n install.sh scripts/validate-plugin.sh scripts/check-actions-pinned.sh scripts/release-notes.sh`, `node --check bin/chromium-castctl test/fixtures/dummy-chromium-cast`, and `node --test`.
 - `bin/chromium-castctl` is the authority for receiver discovery and casting safety. Quickshell should consume `chromium-castctl sinks --json`; do not reintroduce newline-delimited untrusted receiver names into `Chromecast.qml`.
+- Helper architecture and lifecycle/security boundaries are documented in `docs/architecture.md`; keep `bin/chromium-castctl` as a thin wrapper over `lib/chromium-castctl/` modules.
 - Chromium CDP is loopback-only but unauthenticated by Chromium; keep controller state under private XDG paths, validate CDP URLs/process identity before reuse/signaling, and treat the plugin as a single-user desktop tool rather than a cross-user isolation boundary.
 
 ## Maintaining this file
