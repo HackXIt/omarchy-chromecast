@@ -6,7 +6,7 @@ The release workflow expects a versioned section named `## [X.Y.Z]` for tag `vX.
 
 ## [Unreleased]
 
-Release candidate notes for the post-`v0.1.1` security and lifecycle hardening. Before tagging, move these entries into a versioned section and update `manifest.json` to the same version.
+## [0.1.2] - 2026-08-23
 
 ### Security
 
@@ -21,7 +21,7 @@ Release candidate notes for the post-`v0.1.1` security and lifecycle hardening. 
 ### Changed
 
 - Expanded lifecycle and security regression coverage with dummy Cast backend workflows, pinned GitHub Actions, and release archive checksum validation. ([PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
-- Added this changelog as the source for future GitHub Release notes and documented the tag-driven release process.
+- Added this changelog as the source for future GitHub Release notes and documented the tag-driven release process. ([PR #33](https://github.com/HackXIt/omarchy-chromecast/pull/33))
 
 ## [0.1.1] - 2026-08-23
 
