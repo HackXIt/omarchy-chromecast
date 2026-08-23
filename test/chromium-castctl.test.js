@@ -346,6 +346,29 @@ test('status --waybar renders active sink JSON', () => {
   });
 });
 
+test('status --waybar escapes markup-shaped sink names and errors', () => {
+  const active = JSON.parse(mod.renderWaybarStatus({ activeSink: '<img src="http://example.test/pixel"> & TV' }));
+  assert.deepEqual(active, {
+    text: ' &lt;img src=&quot;http://example.test/pixel&quot;&gt; &amp; TV',
+    class: 'active',
+    tooltip: 'Casting to &lt;img src=&quot;http://example.test/pixel&quot;&gt; &amp; TV',
+  });
+
+  const error = JSON.parse(mod.renderWaybarStatus({ error: new Error('<b>boom</b> & retry'), stale: false }));
+  assert.deepEqual(error, {
+    text: '',
+    class: 'error',
+    tooltip: 'Chromecast: &lt;b&gt;boom&lt;/b&gt; &amp; retry',
+  });
+
+  const busy = JSON.parse(mod.renderWaybarStatus({ busy: { label: '<i>Scanning</i> & waiting' } }));
+  assert.deepEqual(busy, {
+    text: ' ...',
+    class: 'busy',
+    tooltip: '&lt;i&gt;Scanning&lt;/i&gt; &amp; waiting',
+  });
+});
+
 test('status --waybar renders busy discovery JSON', () => {
   const json = mod.renderWaybarStatus({ busy: { label: 'Discovering Chromecast targets…' } });
   assert.deepEqual(JSON.parse(json), {

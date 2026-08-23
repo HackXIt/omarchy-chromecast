@@ -70,6 +70,10 @@ BarWidget {
     return String(klass || "").toLowerCase().indexOf(needle) !== -1
   }
 
+  function neutralizeMarkup(value) {
+    return String(value || "").replace(/</g, "‹").replace(/>/g, "›")
+  }
+
   function buildActions() {
     var rows = []
     rows.push({ kind: "pick", icon: "󰐊", label: statusActive ? "Change target" : "Start casting", subtitle: sinks.length > 0 ? "Choose from the targets below" : "Scan for available Chromecast targets", enabled: !commandBusy })
@@ -94,8 +98,8 @@ BarWidget {
 
     try {
       var data = JSON.parse(trimmed)
-      statusText = String(data.text || "")
-      statusTooltip = String(data.tooltip || "Chromecast")
+      statusText = neutralizeMarkup(data.text || "")
+      statusTooltip = neutralizeMarkup(data.tooltip || "Chromecast")
       statusClass = data.class || data.alt || ""
       statusActive = classContains(statusClass, "active") || classContains(statusClass, "playing")
       statusBusy = classContains(statusClass, "busy")
@@ -108,7 +112,7 @@ BarWidget {
       if (!statusBusy && lastError === "chromium-castctl status failed") lastError = ""
     } catch (e) {
       statusText = ""
-      statusTooltip = trimmed
+      statusTooltip = neutralizeMarkup(trimmed)
       statusClass = ""
       statusActive = false
       statusBusy = false
@@ -389,6 +393,7 @@ BarWidget {
             visible: root.actionStatus !== "" || root.lastError !== ""
             width: parent.width
             text: root.lastError !== "" ? root.lastError : root.actionStatus
+            textFormat: Text.PlainText
             color: root.lastError !== "" ? root.urgent : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -496,7 +501,7 @@ BarWidget {
         root.targetRefreshError = false
         root.lastError = "chromium-castctl status failed"
         root.statusText = ""
-        root.statusTooltip = String(statusStderr.text || "Chromecast status failed").trim()
+        root.statusTooltip = root.neutralizeMarkup(String(statusStderr.text || "Chromecast status failed").trim())
         root.statusActive = false
         root.statusBusy = false
       }
@@ -585,6 +590,7 @@ BarWidget {
         Text {
           Layout.fillWidth: true
           text: actionRow.action ? String(actionRow.action.label || "") : ""
+          textFormat: Text.PlainText
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -594,6 +600,7 @@ BarWidget {
         Text {
           Layout.fillWidth: true
           text: actionRow.action ? String(actionRow.action.subtitle || "") : ""
+          textFormat: Text.PlainText
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -646,6 +653,7 @@ BarWidget {
         Text {
           Layout.fillWidth: true
           text: sinkRow.sinkName
+          textFormat: Text.PlainText
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -656,6 +664,7 @@ BarWidget {
         Text {
           Layout.fillWidth: true
           text: sinkRow.currentSink ? "Currently casting" : "Start desktop mirroring"
+          textFormat: Text.PlainText
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
