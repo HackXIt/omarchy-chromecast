@@ -930,7 +930,7 @@ async function waitForDevToolsActivePort(paths, child, options = {}) {
       if (port) return port;
     } catch (error) {
       lastError = error;
-      break;
+      if (error.message === 'DevToolsActivePort is unexpectedly large') break;
     }
     await sleep(100);
   }
