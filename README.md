@@ -118,6 +118,7 @@ chromium-castctl doctor
 chromium-castctl doctor --quickshell
 chromium-castctl doctor
 chromium-castctl sinks
+chromium-castctl sinks --json
 chromium-castctl pick
 chromium-castctl start Wohnzimmer
 chromium-castctl status
@@ -148,7 +149,7 @@ Lifecycle notes:
 - `sinks` launches Chromium with a fresh isolated profile for discovery, then closes it again if no cast is active.
 - `pick` uses live Avahi/mDNS discovery first so Walker can open quickly. When Avahi finds targets, it starts the headless Chromium control browser in the background while Walker is open, then reuses or waits for that browser after a sink is selected. If Avahi finds no targets, it falls back to Chromium discovery.
 - `waybar-toggle` marks the module busy, signals Waybar, then runs toggle work in the background so the bar can repaint immediately.
-- `stop` stops active casts and closes the isolated Chromium control browser.
+- `stop` attempts to stop every active cast and proceeds with closing the isolated Chromium control browser even when a Cast stop request fails.
 
 ## First-run portal prompt
 

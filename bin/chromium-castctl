@@ -1751,7 +1751,7 @@ function usage() {
 
 Commands:
   doctor [--quickshell] Check local Chromium/Cast/portal prerequisites
-  sinks                  List available Cast sink names
+  sinks [--json]         List Cast sinks as names or structured JSON
   pick                   Pick a sink with Walker, or start the only sink directly
   start <sink-name>      Start desktop mirroring to a sink
   stop                   Stop active casting sessions
