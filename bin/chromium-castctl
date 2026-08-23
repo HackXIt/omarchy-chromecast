@@ -1264,7 +1264,7 @@ function normalizeSinkList(sinks) {
     normalized.push(next);
     if (normalized.length > MAX_SINKS) throw new CliError(`More than ${MAX_SINKS} Chromecast targets were usable`, 1);
   }
-  return normalized;
+  return distinctNormalizedSinks(normalized);
 }
 
 function sinkIsActive(sink) {
@@ -1279,20 +1279,35 @@ function sinkNameKey(name) {
   return String(name || '').toLocaleLowerCase();
 }
 
-function distinctSinksByIdentity(sinks) {
-  const normalized = normalizeSinkList(sinks || []);
-  const namesWithIdentity = new Set(normalized.filter((sink) => sink.id).map((sink) => sinkNameKey(sink.name)));
+function distinctNormalizedSinks(normalized) {
   const distinct = [];
-  const identities = new Set();
+  const identityIndexes = new Map();
+  const firstIdentityByName = new Map();
+  for (const sink of normalized) {
+    if (sink.id && !firstIdentityByName.has(sinkNameKey(sink.name))) {
+      firstIdentityByName.set(sinkNameKey(sink.name), sink.id);
+    }
+  }
   for (const sink of normalized) {
     const nameKey = sinkNameKey(sink.name);
-    if (!sink.id && namesWithIdentity.has(nameKey)) continue;
-    const key = sink.id ? `id:${sink.id}` : `unknown:${nameKey}`;
-    if (identities.has(key)) continue;
-    identities.add(key);
+    const id = sink.id || firstIdentityByName.get(nameKey);
+    const key = id ? `id:${id}` : `unknown:${nameKey}`;
+    if (identityIndexes.has(key)) {
+      const index = identityIndexes.get(key);
+      const current = distinct[index];
+      const preferred = current.id ? current : sink.id ? sink : current;
+      const active = sinkIsActive(current) ? current : sinkIsActive(sink) ? sink : null;
+      distinct[index] = active && !sinkIsActive(preferred) ? { ...preferred, session: active.session } : preferred;
+      continue;
+    }
+    identityIndexes.set(key, distinct.length);
     distinct.push(sink);
   }
   return distinct;
+}
+
+function distinctSinksByIdentity(sinks) {
+  return normalizeSinkList(sinks || []);
 }
 
 function groupedSinkRows(sinks) {
@@ -1529,9 +1544,10 @@ function requireWalker(env = process.env) {
 function runWalker(sinks, options = {}) {
   const env = options.env || process.env;
   const walker = requireWalker(env);
+  const normalized = normalizeSinkList(sinks);
 
-  assertNoAmbiguousSinks(sinks);
-  const input = `${sinks.map((sink) => sink.name).join('\n')}\n`;
+  assertNoAmbiguousSinks(normalized);
+  const input = `${normalized.map((sink) => sink.name).join('\n')}\n`;
   const result = childProcess.spawnSync(walker, ['--dmenu', '--placeholder', 'Cast to…'], {
     input,
     encoding: 'utf8',

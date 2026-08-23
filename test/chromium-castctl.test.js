@@ -793,6 +793,15 @@ test('sink matching prefers established identity over an id-less duplicate', () 
   );
 });
 
+test('active sink enumeration deduplicates advertisements and preserves sessions', () => {
+  assert.deepEqual(mod.activeSinks([
+    { name: 'Trusted TV', id: 'receiver-a', session: null },
+    { name: 'Trusted TV', session: { id: 'cast-session' } },
+  ]), [
+    { name: 'Trusted TV', id: 'receiver-a', source: 'chromium', session: { id: 'cast-session' } },
+  ]);
+});
+
 test('getPageTarget rejects hostile CDP WebSocket URLs', async () => {
   const cases = [
     'ws://localhost:9222/devtools/page/page-1',
