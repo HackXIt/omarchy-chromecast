@@ -10,17 +10,27 @@ The release workflow expects a versioned section named `## [X.Y.Z]` for tag `vX.
 
 ### Security
 
-- Hardened Chromium controller state, private file handling, lock ownership, CDP WebSocket validation, and bounded CDP responses so the helper treats Chromium's loopback DevTools listener as unauthenticated local IPC. ([PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
-- Treated receiver names and helper override values as untrusted input: Quickshell now consumes structured JSON target data, target names render as plain text, ambiguous duplicate receiver names are rejected, and unsafe helper overrides fall back to the bundled helper. ([PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
+- Revalidated Chromium process identity before signaling and refused unverified stale PID or process-group cleanup. ([#20](https://github.com/HackXIt/omarchy-chromecast/issues/20), [PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
+- Validated CDP WebSocket endpoints before reuse so only the expected loopback DevTools endpoint is accepted. ([#21](https://github.com/HackXIt/omarchy-chromecast/issues/21), [PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
+- Serialized controller state transitions with a per-user lock and conservative stale-lock recovery. ([#22](https://github.com/HackXIt/omarchy-chromecast/issues/22), [PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
+- Bounded untrusted discovery, CDP, helper output, sink counts, and sink names before parsing or display. ([#23](https://github.com/HackXIt/omarchy-chromecast/issues/23), [PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
+- Switched Quickshell target loading to structured JSON and sanitized control characters in receiver names. ([#24](https://github.com/HackXIt/omarchy-chromecast/issues/24), [PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
+- Pinned GitHub Actions, narrowed release publish permissions, and added release archive checksum validation. ([#25](https://github.com/HackXIt/omarchy-chromecast/issues/25), [PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
+- Hardened XDG/state/profile filesystem handling with private paths, file modes, and safer stale-state cleanup. ([#26](https://github.com/HackXIt/omarchy-chromecast/issues/26), [PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
+- Constrained trusted helper overrides so unsafe `castctl` paths fall back to the bundled helper. ([#27](https://github.com/HackXIt/omarchy-chromecast/issues/27), [PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
+- Rejected ambiguous duplicate receiver friendly names instead of silently choosing the first match. ([#29](https://github.com/HackXIt/omarchy-chromecast/issues/29), [PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
 
 ### Fixed
 
-- Detects and cleans stale or orphaned `chromium-castctl` profile browser instances when controller startup is interrupted or state is missing, while keeping `status` and `doctor` honest. ([PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
-- Stops active casts and closes the isolated Chromium control browser more reliably, including cases where an individual Cast stop request fails. ([PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
+- Detects and cleans stale or orphaned `chromium-castctl` profile browser instances when controller startup is interrupted or state is missing, while keeping `status` and `doctor` honest. ([#20](https://github.com/HackXIt/omarchy-chromecast/issues/20), [#22](https://github.com/HackXIt/omarchy-chromecast/issues/22), [PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
+- Stops active casts and closes the isolated Chromium control browser more reliably, including cases where an individual Cast stop request fails. ([#30](https://github.com/HackXIt/omarchy-chromecast/issues/30), [PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
+
+### Testing
+
+- Extended the dummy Cast backend and regression suite with hostile CDP, filesystem, receiver ambiguity, stop-failure, and concurrency fixtures. ([#28](https://github.com/HackXIt/omarchy-chromecast/issues/28), [PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
 
 ### Changed
 
-- Expanded lifecycle and security regression coverage with dummy Cast backend workflows, pinned GitHub Actions, and release archive checksum validation. ([PR #31](https://github.com/HackXIt/omarchy-chromecast/pull/31))
 - Added this changelog as the source for future GitHub Release notes and documented the tag-driven release process. ([PR #33](https://github.com/HackXIt/omarchy-chromecast/pull/33))
 
 ## [0.1.1] - 2026-08-23
