@@ -888,6 +888,69 @@ test('stop tries every active sink and clears local controller state after stop 
   assert.equal(mod.readState(paths), null);
 });
 
+test('stop clears local controller state when CDP target setup fails', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  mod.writeState(paths, {
+    pid: process.pid,
+    port: 9222,
+    remoteDebuggingAddress: '127.0.0.1',
+    userDataDir: paths.profileDir,
+    launchMode: 'headless',
+    profileVersion: 4,
+    castAudio: false,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    processGroupId: process.pid,
+  });
+  let stderr = '';
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls += 1;
+    if (fetchCalls === 1) return jsonResponse([cdpPageTarget(9222)]);
+    throw new Error('CDP target lookup failed');
+  };
+
+  const code = await mod.run(
+    ['stop'],
+    {
+      stdout: { write: () => {} },
+      stderr: { write: (chunk) => { stderr += chunk; } },
+    },
+    { ...process.env, HOME: paths.home, CHROMIUM_CASTCTL_SINK_WAIT_MS: '1' },
+    { paths, fetchImpl, WebSocketImpl: EmptySinkWebSocket },
+  );
+
+  assert.equal(code, 1);
+  assert.match(stderr, /CDP target lookup failed/);
+  assert.equal(mod.readState(paths), null);
+});
+
+test('an old lock remains owned by its live verified process', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  fs.mkdirSync(paths.lockDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(paths.lockDir, 'owner.json'), JSON.stringify({
+    pid: process.pid,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    nonce: 'existing-owner',
+  }));
+  const old = new Date(Date.now() - 300000);
+  fs.utimesSync(paths.lockDir, old, old);
+  let stderr = '';
+
+  const code = await mod.run(
+    ['sinks'],
+    {
+      stdout: { write: () => {} },
+      stderr: { write: (chunk) => { stderr += chunk; } },
+    },
+    { ...process.env, HOME: paths.home, CHROMIUM_CASTCTL_LOCK_TIMEOUT_MS: '0' },
+    { paths },
+  );
+
+  assert.equal(code, 1);
+  assert.match(stderr, /already in progress/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(paths.lockDir, 'owner.json'), 'utf8')).nonce, 'existing-owner');
+});
+
 
 test('sinks --json marks duplicate friendly names as ambiguous and not startable', async () => {
   const paths = mod.resolvePaths({ HOME: tempHome() });

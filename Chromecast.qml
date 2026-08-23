@@ -158,27 +158,27 @@ BarWidget {
   function parseSinks(raw) {
     var rows = []
     var warning = ""
-    var text = limitRawText(raw, maxHelperTextLength)
+    var validResponse = false
     try {
       var data = JSON.parse(String(raw || ""))
-      var items = Array.isArray(data) ? data : (Array.isArray(data.sinks) ? data.sinks : [])
+      var items
+      if (Array.isArray(data)) items = data
+      else if (data && Array.isArray(data.sinks)) items = data.sinks
+      else throw new Error("Invalid structured sink response")
       for (var i = 0; i < items.length && rows.length < maxSinkCount; i++) {
         var record = normalizedSinkRecord(items[i])
-        if (record) rows.push(record)
+        if (!record) throw new Error("Invalid structured sink record")
+        rows.push(record)
       }
+      validResponse = true
       if (items.length > maxSinkCount) warning = "Too many Chromecast targets; showing the first " + maxSinkCount + "."
     } catch (e) {
-      var seen = {}
-      var lines = text.split(/\r?\n/)
-      for (var j = 0; j < lines.length && rows.length < maxSinkCount; j++) {
-        var name = safeDisplayText(lines[j], maxSinkNameLength).trim()
-        if (name === "" || seen[name]) continue
-        seen[name] = true
-        rows.push({ name: name, displayName: name, startable: true, ambiguous: false, duplicateCount: 1 })
-      }
+      rows = []
+      targetRefreshError = true
+      lastError = "Invalid structured Chromecast target response"
     }
     sinks = rows
-    if (targetRefreshError) {
+    if (targetRefreshError && validResponse) {
       lastError = ""
       targetRefreshError = false
     }

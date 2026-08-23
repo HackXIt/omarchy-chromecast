@@ -233,13 +233,13 @@ function lockIsStale(paths) {
   const ageMs = Date.now() - stat.mtimeMs;
   const owner = readLockOwner(paths);
   if (!owner || !Number.isInteger(owner.pid)) return ageMs > LOCK_STALE_MS;
-  if (ageMs > LOCK_STALE_MS) return true;
   if (!isPidAlive(owner.pid)) return true;
   if (owner.processStartTime) {
     const identity = readProcessIdentity(owner.pid);
     if (!identity || identity.startTime !== String(owner.processStartTime)) return true;
+    return false;
   }
-  return false;
+  return ageMs > LOCK_STALE_MS;
 }
 
 async function acquireStateLock(paths, options = {}) {
@@ -1190,9 +1190,10 @@ async function withCastClient(paths, options, callback) {
     : await ensureChromium(paths, options);
   if (!browser) return callback({ browser: null, client: null, sinks: [] });
 
-  const target = await getPageTarget(browser.port, options);
-  const client = await CdpClient.connect(target.webSocketDebuggerUrl, options);
+  let client = null;
   try {
+    const target = await getPageTarget(browser.port, options);
+    client = await CdpClient.connect(target.webSocketDebuggerUrl, options);
     const sinks = await collectCastSinks(client, {
       waitMs: options.waitMs,
       timeoutMs: options.timeoutMs || cdpTimeoutMs(options.env || process.env),
@@ -1203,7 +1204,7 @@ async function withCastClient(paths, options, callback) {
     await shutdownBrowser(paths, browser, client).catch(() => null);
     throw error;
   } finally {
-    client.close();
+    if (client) client.close();
   }
 }
 
