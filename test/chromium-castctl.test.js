@@ -724,7 +724,7 @@ test('CDP client increments JSON-RPC IDs and collects Cast sinks', async () => {
   FakeWebSocket.instances = [];
   const client = await mod.CdpClient.connect('ws://fake-devtools', { WebSocketImpl: FakeWebSocket, timeoutMs: 1000 });
   const sinks = await mod.enableCastAndCollectSinks(client, { waitMs: 1000, timeoutMs: 1000 });
-  await client.send('Cast.startDesktopMirroring', { sinkName: 'Wohnzimmer' }, 1000);
+  await mod.startDesktopMirroring(client, { name: 'Wohnzimmer' }, 1000);
 
   const ws = FakeWebSocket.instances[0];
   assert.deepEqual(sinks, [{ name: 'Wohnzimmer', session: null }]);

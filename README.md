@@ -291,6 +291,8 @@ bash -n install.sh scripts/validate-plugin.sh scripts/check-actions-pinned.sh sc
 
 The GitHub Actions workflow runs these checks on pushes and pull requests. The Node test suite starts a dependency-free dummy Chromium/CDP Cast backend and exercises the same helper workflows the Quickshell plugin uses: target discovery, start, active status, stop, and idle status.
 
+See [docs/architecture.md](docs/architecture.md) for the helper module map, lifecycle diagrams, security boundaries, and dependency-free tradeoffs.
+
 Omarchy Marketplace verification is separate: the marketplace must scan and record the exact listed commit before it can display `Verified`.
 
 No npm dependencies are required. Full visual Quickshell/Omarchy shell interaction still needs manual validation on an Omarchy desktop.
