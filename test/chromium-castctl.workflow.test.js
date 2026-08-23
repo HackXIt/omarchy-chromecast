@@ -19,10 +19,11 @@ function writeExecutable(file, content) {
   fs.chmodSync(file, 0o755);
 }
 
-function makeEnv(home) {
+function makeEnv(home, browserExecutable = process.execPath, wrapperDelaySeconds = 0) {
   const fakeBin = path.join(home, 'bin');
   fs.mkdirSync(fakeBin, { recursive: true });
-  writeExecutable(path.join(fakeBin, 'chromium'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(dummyChromium)} "$@"\n`);
+  const delay = wrapperDelaySeconds > 0 ? `/bin/sleep ${wrapperDelaySeconds}\n` : '';
+  writeExecutable(path.join(fakeBin, 'chromium'), `#!/bin/sh\n${delay}exec ${JSON.stringify(browserExecutable)} ${JSON.stringify(dummyChromium)} "$@"\n`);
 
   return {
     HOME: home,
@@ -40,6 +41,33 @@ function runCastctl(args, env) {
     encoding: 'utf8',
     timeout: 10000,
   });
+}
+
+function runCastctlAsync(args, env) {
+  const child = childProcess.spawn(process.execPath, [bin, ...args], { env, encoding: 'utf8' });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve({ status: null, stdout, stderr: `${stderr}\ntimed out` });
+    }, 10000);
+    child.on('exit', (status) => {
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
+
+async function waitForFile(file, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(file)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${file}`);
 }
 
 test('dummy Cast backend exercises plugin helper workflow commands', () => {
@@ -89,4 +117,165 @@ test('dummy Cast backend exercises plugin helper workflow commands', () => {
       }
     }
   }
+});
+
+test('status cleans a wrapped orphan after its browser executable is replaced', () => {
+  const home = tempHome();
+  const browserExecutable = path.join(home, 'bin', 'dummy-node');
+  const oldBrowserExecutable = `${browserExecutable}.old`;
+  fs.mkdirSync(path.dirname(browserExecutable), { recursive: true });
+  fs.copyFileSync(process.execPath, browserExecutable);
+  fs.chmodSync(browserExecutable, 0o755);
+  const env = makeEnv(home, browserExecutable);
+  const paths = mod.resolvePaths(env);
+  let browserPid;
+
+  try {
+    const start = runCastctl(['start', 'Dummy Living Room'], env);
+    assert.equal(start.status, 0, start.stderr);
+    const state = mod.readState(paths);
+    assert.ok(state && mod.isPidAlive(state.pid));
+    browserPid = state.pid;
+    fs.renameSync(browserExecutable, oldBrowserExecutable);
+    fs.copyFileSync(process.execPath, browserExecutable);
+    fs.chmodSync(browserExecutable, 0o755);
+    fs.rmSync(oldBrowserExecutable);
+    fs.rmSync(paths.stateFile);
+
+    const status = runCastctl(['status', '--waybar'], env);
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(JSON.parse(status.stdout).class, 'idle');
+    assert.equal(mod.isPidAlive(browserPid), false);
+    assert.equal(mod.readState(paths), null);
+  } finally {
+    if (browserPid && mod.isPidAlive(browserPid)) {
+      try {
+        process.kill(-browserPid, 'SIGKILL');
+      } catch {
+        process.kill(browserPid, 'SIGKILL');
+      }
+    }
+  }
+});
+
+test('status cleans a wrapped orphan after controller startup is interrupted', async () => {
+  const home = tempHome();
+  const env = { ...makeEnv(home), CHROMIUM_CASTCTL_DUMMY_DEVTOOLS_DELAY_MS: '2000' };
+  const paths = mod.resolvePaths(env);
+  const controller = childProcess.spawn(process.execPath, [bin, 'start', 'Dummy Living Room'], {
+    env,
+    stdio: 'ignore',
+  });
+  let browserPid;
+
+  try {
+    await waitForFile(paths.browserIdentityFile);
+    const launched = JSON.parse(fs.readFileSync(paths.browserIdentityFile, 'utf8'));
+    browserPid = launched.pid;
+    assert.equal(mod.readState(paths), null);
+    assert.equal(mod.isPidAlive(browserPid), true);
+
+    controller.kill('SIGKILL');
+    await new Promise((resolve) => controller.once('exit', resolve));
+
+    const status = runCastctl(['status', '--waybar'], env);
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(JSON.parse(status.stdout).class, 'idle');
+    assert.equal(mod.isPidAlive(browserPid), false);
+  } finally {
+    if (controller.exitCode === null && controller.signalCode === null) controller.kill('SIGKILL');
+    if (browserPid && mod.isPidAlive(browserPid)) {
+      try {
+        process.kill(-browserPid, 'SIGKILL');
+      } catch {
+        process.kill(browserPid, 'SIGKILL');
+      }
+    }
+  }
+});
+
+test('startup identity survives a wrapper hiding its launch arguments', async () => {
+  const home = tempHome();
+  const env = makeEnv(home);
+  const fakeBin = path.join(home, 'bin');
+  const wrapper = path.join(fakeBin, 'chromium');
+  writeExecutable(wrapper, `#!/bin/bash
+saved_args=$(printf '%s\\n' "$@" | base64 -w0)
+export saved_args
+exec -a chromium-wrapper-initializing /bin/bash -c 'sleep 1; mapfile -t args < <(printf %s "$saved_args" | base64 -d); exec ${JSON.stringify(process.execPath)} ${JSON.stringify(dummyChromium)} "\${args[@]}"'
+`);
+  const paths = mod.resolvePaths(env);
+  const controller = childProcess.spawn(process.execPath, [bin, 'start', 'Dummy Living Room'], {
+    env,
+    stdio: 'ignore',
+  });
+  let browserPid;
+
+  try {
+    await waitForFile(paths.browserIdentityFile);
+    const launched = JSON.parse(fs.readFileSync(paths.browserIdentityFile, 'utf8'));
+    browserPid = launched.pid;
+    assert.equal(mod.readState(paths), null);
+    assert.equal(mod.isPidAlive(browserPid), true);
+
+    controller.kill('SIGKILL');
+    await new Promise((resolve) => controller.once('exit', resolve));
+
+    const status = runCastctl(['status', '--waybar'], env);
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(JSON.parse(status.stdout).class, 'idle');
+    assert.equal(mod.isPidAlive(browserPid), false);
+  } finally {
+    if (controller.exitCode === null && controller.signalCode === null) controller.kill('SIGKILL');
+    if (browserPid && mod.isPidAlive(browserPid)) {
+      try {
+        process.kill(-browserPid, 'SIGKILL');
+      } catch {
+        process.kill(browserPid, 'SIGKILL');
+      }
+    }
+  }
+});
+
+test('browser launch allows wrapper transitions across the startup timeout', () => {
+  const home = tempHome();
+  const env = makeEnv(home, process.execPath, 1.2);
+
+  const sinks = runCastctl(['sinks'], env);
+
+  assert.equal(sinks.status, 0, sinks.stderr);
+  assert.equal(sinks.stdout.trim(), 'Dummy Living Room');
+});
+
+test('browser startup phases share one timeout deadline', () => {
+  const home = tempHome();
+  const env = {
+    ...makeEnv(home),
+    CHROMIUM_CASTCTL_BROWSER_TIMEOUT_MS: '300',
+    CHROMIUM_CASTCTL_DUMMY_DEVTOOLS_DELAY_MS: '150',
+    CHROMIUM_CASTCTL_DUMMY_CDP_READY_DELAY_MS: '400',
+  };
+  const startedAt = Date.now();
+
+  const sinks = runCastctl(['sinks'], env);
+
+  assert.equal(sinks.status, 1);
+  assert.ok(Date.now() - startedAt < 700);
+});
+
+test('concurrent discovery commands serialize controller state and leave no active browser state', async () => {
+  const home = tempHome();
+  const env = makeEnv(home);
+  const paths = mod.resolvePaths(env);
+
+  const [first, second] = await Promise.all([
+    runCastctlAsync(['sinks'], env),
+    runCastctlAsync(['sinks'], env),
+  ]);
+
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(first.stdout.trim(), 'Dummy Living Room');
+  assert.equal(second.stdout.trim(), 'Dummy Living Room');
+  assert.equal(mod.readState(paths), null);
 });

@@ -44,8 +44,12 @@ BarWidget {
   property bool cursorActive: false
 
   readonly property string bundledCastctl: Quickshell.env("HOME") + "/.config/omarchy/plugins/hackxit.chromecast/bin/chromium-castctl"
-  readonly property string castctl: String(setting("castctl", bundledCastctl))
+  readonly property string configuredCastctl: String(setting("castctl", bundledCastctl))
+  readonly property string castctl: safeCastctlPath(configuredCastctl) ? configuredCastctl : bundledCastctl
   readonly property int intervalMs: Math.max(1000, Number(setting("intervalMs", 5000)))
+  readonly property int maxSinkCount: 64
+  readonly property int maxSinkNameLength: 160
+  readonly property int maxHelperTextLength: 65536
   readonly property bool alwaysVisible: setting("alwaysVisible", false) === true
   readonly property bool commandBusy: actionProc.running || sinksProc.running
   readonly property bool busy: statusBusy || commandBusy
@@ -71,7 +75,41 @@ BarWidget {
   }
 
   function neutralizeMarkup(value) {
-    return String(value || "").replace(/</g, "‹").replace(/>/g, "›")
+    return safeDisplayText(value, maxHelperTextLength).replace(/</g, "‹").replace(/>/g, "›")
+  }
+
+  function safeCastctlPath(value) {
+    var text = String(value || "")
+    // Reject C0 controls (U+0000-U+001F) and DEL/C1 controls (U+007F-U+009F) in helper paths.
+    return text.indexOf("/") === 0 && !/[\u0000-\u001f\u007f-\u009f]/.test(text)
+  }
+
+  function limitRawText(value, maxLength) {
+    var text = String(value || "")
+    var limit = Math.max(1, Number(maxLength || maxHelperTextLength))
+    if (text.length > limit) return text.slice(0, limit - 1) + "…"
+    return text
+  }
+
+  function safeDisplayText(value, maxLength) {
+    // Replace C0 controls (U+0000-U+001F), DEL/C1 controls (U+007F-U+009F),
+    // and bidi override/isolate controls (U+202A-U+202E, U+2066-U+2069) in untrusted display text.
+    var text = String(value || "").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "�")
+    return limitRawText(text, maxLength)
+  }
+
+  function normalizedSinkRecord(value) {
+    if (!value) return null
+    var name = safeDisplayText(value.name || "", maxSinkNameLength).trim()
+    var displayName = safeDisplayText(value.displayName || name, maxSinkNameLength + 40).trim()
+    if (name === "" || displayName === "") return null
+    return {
+      name: name,
+      displayName: displayName,
+      startable: value.startable !== false && value.ambiguous !== true,
+      ambiguous: value.ambiguous === true,
+      duplicateCount: Number(value.duplicateCount || 1)
+    }
   }
 
   function buildActions() {
@@ -122,19 +160,32 @@ BarWidget {
 
   function parseSinks(raw) {
     var rows = []
-    var seen = {}
-    var lines = String(raw || "").split(/\r?\n/)
-    for (var i = 0; i < lines.length; i++) {
-      var name = String(lines[i] || "").trim()
-      if (name === "" || seen[name]) continue
-      seen[name] = true
-      rows.push(name)
+    var warning = ""
+    var validResponse = false
+    try {
+      var data = JSON.parse(String(raw || ""))
+      var items
+      if (Array.isArray(data)) items = data
+      else if (data && Array.isArray(data.sinks)) items = data.sinks
+      else throw new Error("Invalid structured sink response")
+      for (var i = 0; i < items.length && rows.length < maxSinkCount; i++) {
+        var record = normalizedSinkRecord(items[i])
+        if (!record) throw new Error("Invalid structured sink record")
+        rows.push(record)
+      }
+      validResponse = true
+      if (items.length > maxSinkCount) warning = "Too many Chromecast targets; showing the first " + maxSinkCount + "."
+    } catch (e) {
+      rows = []
+      targetRefreshError = true
+      lastError = "Invalid structured Chromecast target response"
     }
     sinks = rows
-    if (targetRefreshError) {
+    if (targetRefreshError && validResponse) {
       lastError = ""
       targetRefreshError = false
     }
+    if (warning !== "") lastError = warning
     if (sinkIndex >= sinks.length) sinkIndex = Math.max(0, sinks.length - 1)
     ensureCursor()
   }
@@ -151,7 +202,7 @@ BarWidget {
       lastError = ""
       targetRefreshError = false
     }
-    sinksProc.command = [castctl, "sinks"]
+    sinksProc.command = [castctl, "sinks", "--json"]
     sinksProc.running = true
   }
 
@@ -194,15 +245,15 @@ BarWidget {
 
   function chooseTarget() {
     if (commandBusy) return
-    if (sinks.length === 1) {
+    if (sinks.length === 1 && sinks[0].startable !== false) {
       startSink(sinks[0])
       return
     }
-    if (sinks.length > 1) {
+    if (sinks.length > 0) {
       cursorActive = true
       focusSection = "sinks"
       sinkIndex = 0
-      actionStatus = "Choose a Chromecast target below."
+      actionStatus = "Choose a Chromecast target below. Ambiguous duplicate names are disabled."
       return
     }
     actionStatus = "Scanning for Chromecast targets…"
@@ -212,7 +263,15 @@ BarWidget {
   function pickTarget() { chooseTarget() }
   function stopCasting() { runCastctl(["stop"], "Stopping Chromecast cast…", false) }
   function quitBrowser() { runCastctl(["quit-browser"], "Closing Chromium control browser…", false) }
-  function startSink(name) { if (name) runCastctl(["start", String(name)], "Starting cast to " + String(name) + "…", true) }
+  function startSink(sink) {
+    var record = typeof sink === "object" ? sink : { name: String(sink || ""), displayName: String(sink || ""), startable: true }
+    if (!record || !record.name) return
+    if (record.startable === false || record.ambiguous === true) {
+      actionStatus = "Cannot start " + String(record.displayName || record.name) + "; duplicate receiver names are ambiguous."
+      return
+    }
+    runCastctl(["start", String(record.name)], "Starting cast to " + String(record.displayName || record.name) + "…", true)
+  }
   function toggleCast() { statusActive ? stopCasting() : pickTarget() }
 
   function activateAction(kind) {
@@ -459,7 +518,7 @@ BarWidget {
                   required property var modelData
                   required property int index
                   width: parent.width
-                  sinkName: String(modelData || "")
+                  sink: modelData
                   rowIndex: index
                 }
               }
@@ -494,14 +553,14 @@ BarWidget {
   Process {
     id: statusProc
     command: [root.castctl, "status", "--waybar"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.parseStatus(text) }
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.parseStatus(root.safeDisplayText(text, root.maxHelperTextLength)) }
     stderr: StdioCollector { id: statusStderr; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode !== 0) {
         root.targetRefreshError = false
         root.lastError = "chromium-castctl status failed"
         root.statusText = ""
-        root.statusTooltip = root.neutralizeMarkup(String(statusStderr.text || "Chromecast status failed").trim())
+        root.statusTooltip = root.neutralizeMarkup(root.safeDisplayText(statusStderr.text || "Chromecast status failed", root.maxHelperTextLength).trim())
         root.statusActive = false
         root.statusBusy = false
       }
@@ -514,13 +573,13 @@ BarWidget {
     property string errorText: ""
     running: false
     command: []
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: sinksProc.outputText = String(text || "") }
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: sinksProc.errorText = String(text || "") }
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: sinksProc.outputText = root.limitRawText(text, root.maxHelperTextLength) }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: sinksProc.errorText = root.safeDisplayText(text, root.maxHelperTextLength) }
     onExited: function(exitCode) {
       if (exitCode === 0) root.parseSinks(outputText)
       else {
         root.targetRefreshError = true
-        root.lastError = String(errorText || outputText || "Could not list Chromecast targets").trim()
+        root.lastError = root.safeDisplayText(errorText || outputText || "Could not list Chromecast targets", root.maxHelperTextLength).trim()
       }
     }
   }
@@ -531,8 +590,8 @@ BarWidget {
     property string errorText: ""
     running: false
     command: []
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: actionProc.outputText = String(text || "") }
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: actionProc.errorText = String(text || "") }
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: actionProc.outputText = root.safeDisplayText(text, root.maxHelperTextLength) }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: actionProc.errorText = root.safeDisplayText(text, root.maxHelperTextLength) }
     onExited: function(exitCode) {
       var out = String(outputText || "").trim()
       var err = String(errorText || "").trim()
@@ -612,21 +671,26 @@ BarWidget {
 
   component SinkRow: CursorSurface {
     id: sinkRow
-    property string sinkName: ""
+    property var sink: null
     property int rowIndex: 0
-    readonly property bool currentSink: root.statusActive && root.activeSink === sinkName
+    readonly property string sinkName: sink ? String(sink.name || "") : ""
+    readonly property string sinkDisplayName: sink ? String(sink.displayName || sink.name || "") : ""
+    readonly property bool rowEnabled: sink && sink.startable !== false && sink.ambiguous !== true
+    readonly property bool currentSink: root.statusActive && (root.activeSink === sinkName || root.activeSink === sinkDisplayName)
 
     hasCursor: root.cursorActive && root.focusSection === "sinks" && root.sinkIndex === rowIndex
     current: currentSink
     foreground: root.foreground
     implicitHeight: row.implicitHeight + Style.spacing.rowPaddingX
+    opacity: rowEnabled ? 1.0 : 0.45
 
     MouseArea {
       anchors.fill: parent
       hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
+      enabled: sinkRow.rowEnabled
+      cursorShape: sinkRow.rowEnabled ? Qt.PointingHandCursor : Qt.ArrowCursor
       onEntered: root.setSinkCursor(sinkRow.rowIndex)
-      onClicked: root.startSink(sinkRow.sinkName)
+      onClicked: root.startSink(sinkRow.sink)
     }
 
     RowLayout {
@@ -652,7 +716,7 @@ BarWidget {
 
         Text {
           Layout.fillWidth: true
-          text: sinkRow.sinkName
+          text: sinkRow.sinkDisplayName
           textFormat: Text.PlainText
           color: root.foreground
           font.family: root.fontFamily
@@ -663,7 +727,7 @@ BarWidget {
 
         Text {
           Layout.fillWidth: true
-          text: sinkRow.currentSink ? "Currently casting" : "Start desktop mirroring"
+          text: sinkRow.currentSink ? "Currently casting" : (sinkRow.rowEnabled ? "Start desktop mirroring" : "Ambiguous duplicate name; rename one receiver")
           textFormat: Text.PlainText
           color: root.dim
           font.family: root.fontFamily

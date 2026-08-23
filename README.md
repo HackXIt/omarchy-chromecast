@@ -6,7 +6,7 @@ This repository is primarily an **Omarchy Quattro** shell plugin for desktop cas
 
 On Omarchy Quattro, the plugin provides a native Quickshell bar widget and popup UI for choosing targets, starting/stopping desktop mirroring, and refreshing targets. Diagnostics open in an Omarchy floating terminal so the full command output stays readable and waits for the user before closing. The bundled `chromium-castctl` helper controls Chromium's built-in Google Cast backend over the Chrome DevTools Protocol (CDP).
 
-Chromium performs the actual casting. This project only launches an isolated Chromium control instance and sends CDP Cast commands.
+Chromium performs the actual casting. This project only launches an isolated Chromium control instance and sends CDP Cast commands. The CDP endpoint is scoped to the local loopback interface and private per-user state, but Chromium does not provide per-Unix-account authentication for that listener; use this plugin in a normal single-user desktop session, not as a cross-user isolation boundary on a shared host.
 
 This project was vibe-coded from the practical need to have a simple "cast this desktop" button in Omarchy without building a full media-router implementation. The tradeoff is a slower UX: discovery, the isolated Chromium controller, CDP commands, and the Wayland portal prompt can take a moment. In exchange, the implementation stays small and relies on Chromium's already-existing casting capabilities instead of reimplementing them.
 
@@ -29,8 +29,10 @@ This project was vibe-coded from the practical need to have a simple "cast this 
 
 - Uses a fresh isolated Chromium profile at `~/.local/share/chromium-castctl/chromium-profile/` for each new control-browser launch.
 - Does **not** modify the user's normal Chromium profile or Chromium installation.
-- Binds DevTools to `127.0.0.1` only.
+- Binds DevTools to `127.0.0.1` only, stores its state under private XDG directories, and validates discovered CDP WebSocket URLs before connecting.
 - Launches the isolated Chromium control instance headless by default; no Chromium window should appear.
+- Rejects ambiguous duplicate receiver names instead of silently choosing the first matching device.
+- Treats receiver names as untrusted display data: structured JSON is used for the Quickshell target list, control characters are rejected or neutralized, and UI surfaces render names as plain text.
 - Does **not** bypass Wayland/Hyprland portal confirmation.
 - Does **not** edit Waybar config automatically.
 - Omarchy plugin mode does **not** require Walker; target selection happens in the Quickshell popup.
@@ -84,7 +86,7 @@ omarchy-shell shell rescanPlugins
 omarchy restart shell
 ```
 
-The plugin uses the bundled helper at `bin/chromium-castctl` by default. Override the helper path only if you have a separate development checkout:
+The plugin uses the bundled helper at `bin/chromium-castctl` by default. Override the helper path only if you have a separate development checkout that you trust as executable code. The plugin accepts only absolute override paths without control characters; unsafe values fall back to the bundled helper.
 
 ```json
 { "id": "hackxit.chromecast", "castctl": "/path/to/chromium-castctl" }
@@ -108,7 +110,7 @@ command -v chromium-castctl
 chromium-castctl doctor
 ```
 
-`install.sh` symlinks `bin/chromium-castctl` to `~/.local/bin/chromium-castctl` and optionally installs a Waybar icon font for legacy/pre-Quattro Waybar integration. It does not install or enable the Omarchy Quattro plugin.
+`install.sh` symlinks `bin/chromium-castctl` to `~/.local/bin/chromium-castctl` and optionally installs a Waybar icon font for legacy/pre-Quattro Waybar integration. For safety, it refuses symlinked destination directories and will not replace a non-symlink helper at that path. It does not install or enable the Omarchy Quattro plugin.
 
 ## Usage
 
@@ -116,6 +118,7 @@ chromium-castctl doctor
 chromium-castctl doctor --quickshell
 chromium-castctl doctor
 chromium-castctl sinks
+chromium-castctl sinks --json
 chromium-castctl pick
 chromium-castctl start Wohnzimmer
 chromium-castctl status
@@ -144,9 +147,9 @@ Lifecycle notes:
 
 - `status` and `status --waybar` never launch Chromium.
 - `sinks` launches Chromium with a fresh isolated profile for discovery, then closes it again if no cast is active.
-- `pick` uses live Avahi/mDNS discovery first so Walker can open quickly. When Avahi finds targets, it starts the headless Chromium control browser in the background while Walker is open, then reuses or waits for that browser after a sink is selected. If Avahi finds no targets, it falls back to Chromium discovery.
+- `pick` uses live Avahi/mDNS discovery first so Walker can open quickly. When Avahi finds targets, it waits until a unique target is selected before starting the headless Chromium control browser. If Avahi finds no targets, it falls back to Chromium discovery.
 - `waybar-toggle` marks the module busy, signals Waybar, then runs toggle work in the background so the bar can repaint immediately.
-- `stop` stops active casts and closes the isolated Chromium control browser.
+- `stop` attempts to stop every active cast and proceeds with closing the isolated Chromium control browser even when a Cast stop request fails.
 
 ## First-run portal prompt
 
@@ -165,54 +168,14 @@ then portal restore tokens may reduce future prompts, depending on Chromium and 
 
 ## Legacy/pre-Quattro Waybar integration
 
-This repository includes `waybar-module.jsonc` and `waybar-style.css` for older Omarchy or other Waybar-based desktops. Omarchy Quattro users should prefer the native plugin widget and normally do not need this section.
-
-
-```jsonc
-"custom/chromecast": {
-  "exec": "chromium-castctl status --waybar",
-  "return-type": "json",
-  "interval": 5,
-  "signal": 12,
-  "on-click": "chromium-castctl waybar-toggle",
-  "on-click-right": "chromium-castctl stop",
-  "tooltip": true
-}
-```
+This repository includes the authoritative module config in `waybar-module.jsonc` and styling in `waybar-style.css` for older Omarchy or other Waybar-based desktops. Use the provided module config as-is so Waybar escapes untrusted receiver text. Omarchy Quattro users should prefer the native plugin widget and normally do not need this section.
 
 Manual integration after validating the CLI:
 
 1. Back up `~/.config/waybar/config.jsonc` and `~/.config/waybar/style.css`.
 2. Add `custom/chromecast` to the desired Waybar module list.
-3. Add the module config above to the Waybar config.
-4. Add this CSS so the Chromecast glyph uses the local OTF while labels still fall back to the normal Waybar font:
-
-```css
-@keyframes chromecast-busy {
-  to {
-    color: #e0af68;
-  }
-}
-
-#custom-chromecast {
-  min-width: 12px;
-  margin-right: 13px;
-  font-family: "Chromium Castctl Icons", "JetBrainsMono Nerd Font";
-}
-
-#custom-chromecast.busy {
-  animation-name: chromecast-busy;
-  animation-duration: 0.7s;
-  animation-timing-function: ease-in-out;
-  animation-iteration-count: infinite;
-  animation-direction: alternate;
-}
-
-#custom-chromecast.active {
-  color: #9ece6a;
-}
-```
-
+3. Copy the module config from `waybar-module.jsonc` into the Waybar config.
+4. Add the styles from `waybar-style.css` to the Waybar stylesheet.
 5. Restart Waybar:
 
 ```bash
@@ -273,11 +236,13 @@ If the isolated headless browser is running but you are not casting, close it wi
 chromium-castctl quit-browser
 ```
 
-If state becomes stale, the next command removes stale state automatically. To reset manually:
+If state becomes stale, the next controller command removes stale state and cleans up any verified Chromium process using the isolated profile. `doctor` reports stale, extra, or orphaned control-browser processes without launching Chromium. To reset manually:
 
 ```bash
 rm -f ~/.local/state/chromium-castctl/state.json
 ```
+
+Removing this file while the control browser is running temporarily orphans that process; the next controller command detects and closes it.
 
 To remove the isolated Chromium profile and force a clean control browser:
 
@@ -317,9 +282,10 @@ Run tests with Node's built-in test runner and validate the plugin manifest:
 
 ```bash
 ./scripts/validate-plugin.sh .
+./scripts/check-actions-pinned.sh
 node --test
-node --check bin/chromium-castctl
-bash -n install.sh scripts/validate-plugin.sh
+node --check bin/chromium-castctl test/fixtures/dummy-chromium-cast
+bash -n install.sh scripts/validate-plugin.sh scripts/check-actions-pinned.sh
 ```
 
 The GitHub Actions workflow runs these checks on pushes and pull requests. The Node test suite starts a dependency-free dummy Chromium/CDP Cast backend and exercises the same helper workflows the Quickshell plugin uses: target discovery, start, active status, stop, and idle status.
