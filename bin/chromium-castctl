@@ -918,20 +918,30 @@ async function getStatus(paths, options = {}) {
   });
 }
 
+function escapeUiText(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function renderWaybarStatus(status) {
   if (status && status.busy) {
     return JSON.stringify({
       text: `${ICON} ...`,
       class: 'busy',
-      tooltip: status.busy.label || 'Chromecast action in progress…',
+      tooltip: escapeUiText(status.busy.label || 'Chromecast action in progress…'),
     });
   }
 
   if (status && status.activeSink) {
+    const activeSink = escapeUiText(status.activeSink);
     return JSON.stringify({
-      text: `${ICON} ${status.activeSink}`,
+      text: `${ICON} ${activeSink}`,
       class: 'active',
-      tooltip: `Casting to ${status.activeSink}`,
+      tooltip: `Casting to ${activeSink}`,
     });
   }
 
@@ -939,7 +949,7 @@ function renderWaybarStatus(status) {
     return JSON.stringify({
       text: ICON,
       class: 'error',
-      tooltip: `Chromecast: ${status.error.message}`,
+      tooltip: `Chromecast: ${escapeUiText(status.error.message)}`,
     });
   }
 
