@@ -19,10 +19,11 @@ function writeExecutable(file, content) {
   fs.chmodSync(file, 0o755);
 }
 
-function makeEnv(home, browserExecutable = process.execPath) {
+function makeEnv(home, browserExecutable = process.execPath, wrapperDelaySeconds = 0) {
   const fakeBin = path.join(home, 'bin');
   fs.mkdirSync(fakeBin, { recursive: true });
-  writeExecutable(path.join(fakeBin, 'chromium'), `#!/bin/sh\nexec ${JSON.stringify(browserExecutable)} ${JSON.stringify(dummyChromium)} "$@"\n`);
+  const delay = wrapperDelaySeconds > 0 ? `/bin/sleep ${wrapperDelaySeconds}\n` : '';
+  writeExecutable(path.join(fakeBin, 'chromium'), `#!/bin/sh\n${delay}exec ${JSON.stringify(browserExecutable)} ${JSON.stringify(dummyChromium)} "$@"\n`);
 
   return {
     HOME: home,
@@ -191,6 +192,16 @@ test('status cleans a wrapped orphan after controller startup is interrupted', a
       }
     }
   }
+});
+
+test('browser launch allows wrapper transitions across the startup timeout', () => {
+  const home = tempHome();
+  const env = makeEnv(home, process.execPath, 1.2);
+
+  const sinks = runCastctl(['sinks'], env);
+
+  assert.equal(sinks.status, 0, sinks.stderr);
+  assert.equal(sinks.stdout.trim(), 'Dummy Living Room');
 });
 
 test('concurrent discovery commands serialize controller state and leave no active browser state', async () => {
