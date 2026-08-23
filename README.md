@@ -168,20 +168,7 @@ then portal restore tokens may reduce future prompts, depending on Chromium and 
 
 ## Legacy/pre-Quattro Waybar integration
 
-This repository includes `waybar-module.jsonc` and `waybar-style.css` for older Omarchy or other Waybar-based desktops. Omarchy Quattro users should prefer the native plugin widget and normally do not need this section.
-
-
-```jsonc
-"custom/chromecast": {
-  "exec": "chromium-castctl status --waybar",
-  "return-type": "json",
-  "interval": 5,
-  "signal": 12,
-  "on-click": "chromium-castctl waybar-toggle",
-  "on-click-right": "chromium-castctl stop",
-  "tooltip": true
-}
-```
+This repository includes the authoritative module config in `waybar-module.jsonc` and styling in `waybar-style.css` for older Omarchy or other Waybar-based desktops. Use the provided module config as-is so Waybar escapes untrusted receiver text. Omarchy Quattro users should prefer the native plugin widget and normally do not need this section.
 
 Manual integration after validating the CLI:
 
