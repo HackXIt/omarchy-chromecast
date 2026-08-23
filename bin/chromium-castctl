@@ -1756,7 +1756,7 @@ Commands:
 }
 
 function commandUsesStateLock(command) {
-  return ['sinks', 'pick', 'start', 'stop', 'toggle', 'waybar-toggle', 'quit-browser', 'prewarm-browser'].includes(command);
+  return ['sinks', 'pick', 'start', 'stop', 'toggle', 'waybar-toggle', 'status', 'quit-browser', 'prewarm-browser'].includes(command);
 }
 
 async function dispatchCommand(command, args, paths, options, io) {

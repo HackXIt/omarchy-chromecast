@@ -951,6 +951,51 @@ test('an old lock remains owned by its live verified process', async () => {
   assert.equal(JSON.parse(fs.readFileSync(path.join(paths.lockDir, 'owner.json'), 'utf8')).nonce, 'existing-owner');
 });
 
+test('status does not inspect or clean state owned by another locked command', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  fs.mkdirSync(paths.lockDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(paths.lockDir, 'owner.json'), JSON.stringify({
+    pid: process.pid,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    nonce: 'active-command',
+  }));
+  const state = {
+    pid: process.pid,
+    port: 9222,
+    remoteDebuggingAddress: '127.0.0.1',
+    userDataDir: paths.profileDir,
+    launchMode: 'headless',
+    profileVersion: 4,
+    castAudio: false,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    processGroupId: process.pid,
+  };
+  mod.writeState(paths, state);
+  let fetchCalls = 0;
+  let stderr = '';
+
+  const code = await mod.run(
+    ['status', '--waybar'],
+    {
+      stdout: { write: () => {} },
+      stderr: { write: (chunk) => { stderr += chunk; } },
+    },
+    { ...process.env, HOME: paths.home, CHROMIUM_CASTCTL_LOCK_TIMEOUT_MS: '0' },
+    {
+      paths,
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        throw new Error('status must not reach CDP');
+      },
+    },
+  );
+
+  assert.equal(code, 1);
+  assert.match(stderr, /already in progress/);
+  assert.equal(fetchCalls, 0);
+  assert.deepEqual(mod.readState(paths), state);
+});
+
 
 test('sinks --json marks duplicate friendly names as ambiguous and not startable', async () => {
   const paths = mod.resolvePaths({ HOME: tempHome() });
