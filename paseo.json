@@ -1,0 +1,34 @@
+{
+  "worktree": {
+    "setup": "scripts/validate-plugin.sh .",
+    "teardown": "./bin/chromium-castctl quit-browser || true"
+  },
+  "scripts": {
+    "validate-plugin": {
+      "command": "scripts/validate-plugin.sh ."
+    },
+    "doctor-quickshell": {
+      "command": "./bin/chromium-castctl doctor --quickshell"
+    },
+    "doctor": {
+      "command": "./bin/chromium-castctl doctor"
+    },
+    "sinks": {
+      "command": "./bin/chromium-castctl sinks"
+    },
+    "quit-browser": {
+      "command": "./bin/chromium-castctl quit-browser"
+    }
+  },
+  "metadataGeneration": {
+    "branchName": {
+      "instructions": "Use fix/<short-kebab-task>, feat/<short-kebab-task>, or chore/<short-kebab-task>."
+    },
+    "commitMessage": {
+      "instructions": "Use concise conventional-style commits such as fix:, feat:, test:, docs:, or chore:."
+    },
+    "pullRequest": {
+      "instructions": "Include Summary, Testing, and Omarchy/Chromecast behavior sections."
+    }
+  }
+}
