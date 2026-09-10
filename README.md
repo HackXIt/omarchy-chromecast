@@ -37,7 +37,7 @@ This project was vibe-coded from the practical need to have a simple "cast this 
 - Rejects ambiguous duplicate receiver names instead of silently choosing the first matching device.
 - Treats receiver names as untrusted display data: structured JSON is used for the Quickshell target list, control characters are rejected or neutralized, and UI surfaces render names as plain text.
 - Does **not** bypass Wayland/Hyprland portal confirmation.
-- Saves and restores the focused Hyprland display configuration when temporarily selecting a 16:9 mode for casting.
+- Saves and restores the focused Hyprland display's mode, position, scale, and transform when temporarily selecting a 16:9 mode for casting.
 - Does **not** edit Waybar config automatically.
 - Omarchy plugin mode does **not** require Walker; target selection happens in the Quickshell popup.
 
@@ -156,12 +156,13 @@ Use **Run doctor** from the popup to open diagnostics in a floating terminal. Le
 Lifecycle notes:
 
 - `status` and `status --waybar` never launch Chromium.
-- `sinks` launches Chromium with a fresh isolated profile for discovery, then closes it again if no cast is active.
+- `sinks` safely reuses a verified controller with an older launch policy so an upgrade-time popup refresh does not interrupt an active cast. Otherwise it launches Chromium with a fresh isolated profile for discovery, then closes it again if no cast is active.
 - The controller uses an isolated launcher configuration, removes standard Chromium user-flag environment variables, and creates a 1920x1080 virtual display. This isolates normal per-user browser flags and extensions and avoids Chromium's default 800x450 Cast capture limit; system policy and custom browser wrappers can still apply their own settings.
 - `pick` uses live Avahi/mDNS discovery first so Walker can open quickly. When Avahi finds targets, it waits until a unique target is selected before starting the headless Chromium control browser. If Avahi finds no targets, it falls back to Chromium discovery.
 - `waybar-toggle` marks the module busy, signals Waybar, then runs toggle work in the background so the bar can repaint immediately.
 - `stop` attempts to stop every active cast and proceeds with closing the isolated Chromium control browser even when a Cast stop request fails.
 - Immediately before starting desktop mirroring, the helper saves the focused Hyprland display's mode, position, scale, and transform in private state and temporarily selects its closest supported 16:9 mode, preferring 1920x1080. Stop, quit, start failure, and stale-controller cleanup restore the saved configuration. Displays without a suitable mode and non-Hyprland sessions continue without adjustment.
+- After Chromium acknowledges the Cast start request, an empty session list is allowed a 30-second grace period for portal selection and receiver startup. Once that grace period expires, the next status check closes the controller and restores the saved mode, position, scale, and transform. Failed restoration keeps the private display state for a later retry.
 
 ## First-run portal prompt
 

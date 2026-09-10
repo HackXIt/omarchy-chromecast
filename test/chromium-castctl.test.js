@@ -438,7 +438,7 @@ test('16:9 mode selection prefers 1080p and accepts common near-16:9 modes', () 
   assert.equal(mod.isSixteenNine(mod.parseMode('1920x1200@60.00Hz')), false);
 });
 
-test('display fit saves the focused monitor and restores its exact configuration', () => {
+test('display fit restores the focused monitor mode, position, scale, and transform', () => {
   const paths = mod.resolvePaths({ HOME: tempHome() });
   const calls = [];
   const hyprctl = (args) => {
@@ -479,6 +479,27 @@ test('display fit is optional and leaves unsupported monitors unchanged', () => 
   assert.equal(calls, 1);
   assert.equal(mod.readDisplayState(paths), null);
   assert.equal(mod.fitDisplayEnabled({ CHROMIUM_CASTCTL_FIT_DISPLAY: 'off' }), false);
+});
+
+test('display fit grace starts when Chromium acknowledges the Cast request', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const acknowledgedAt = Date.parse('2026-09-10T12:00:00.000Z');
+  mod.writeDisplayState(paths, {
+    ...savedDisplayState(),
+    createdAt: '2026-09-10T11:59:00.000Z',
+  });
+
+  await mod.startMirroring(
+    paths,
+    { fitDisplay: false, now: acknowledgedAt },
+    { send: async () => ({}) },
+    { name: 'Living Room' },
+  );
+
+  const state = mod.readDisplayState(paths);
+  assert.equal(state.createdAt, '2026-09-10T12:00:00.000Z');
+  assert.equal(mod.displayFitGraceActive(state, acknowledgedAt + mod.DISPLAY_FIT_GRACE_MS), true);
+  assert.equal(mod.displayFitGraceActive(state, acknowledgedAt + mod.DISPLAY_FIT_GRACE_MS + 1), false);
 });
 
 test('a failed Cast start restores a temporarily fitted display', async () => {
@@ -539,6 +560,62 @@ test('idle status restores display state left by an interrupted controller', asy
   assert.equal(status.browser, false);
   assert.equal(evals.length, 1);
   assert.equal(mod.readDisplayState(paths), null);
+});
+
+test('status keeps a fitted display during startup grace then cleans up an absent Cast session', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const graceStartedAt = Date.parse('2026-09-10T12:00:00.000Z');
+  const browserState = {
+    pid: process.pid,
+    port: 9222,
+    remoteDebuggingAddress: '127.0.0.1',
+    userDataDir: paths.profileDir,
+    launchMode: 'headless',
+    profileVersion: mod.PROFILE_VERSION,
+    launchConfigVersion: mod.CHROMIUM_LAUNCH_CONFIG_VERSION,
+    castAudio: false,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    processGroupId: process.pid,
+  };
+  const displayState = { ...savedDisplayState(), createdAt: new Date(graceStartedAt).toISOString() };
+  const evals = [];
+  const options = {
+    env: { ...process.env, HOME: paths.home },
+    fetchImpl: async () => jsonResponse([cdpPageTarget(9222)]),
+    WebSocketImpl: EmptySinkWebSocket,
+    waitMs: 1,
+    emptySinkRetryDelayMs: 1,
+    hyprctl: (args) => {
+      if (args[0] === 'eval') evals.push(args[1]);
+      return { status: 0, stdout: '' };
+    },
+  };
+  mod.writeState(paths, browserState);
+  mod.writeDisplayState(paths, displayState);
+
+  const pending = await mod.getStatus(paths, { ...options, now: graceStartedAt + 1000 });
+  assert.equal(pending.browser, true);
+  assert.deepEqual(mod.readState(paths), browserState);
+  assert.deepEqual(mod.readDisplayState(paths), displayState);
+  assert.equal(evals.length, 0);
+
+  const expired = await mod.getStatus(paths, {
+    ...options,
+    now: graceStartedAt + mod.DISPLAY_FIT_GRACE_MS + 1,
+  });
+  assert.equal(expired.browser, false);
+  assert.equal(mod.readState(paths), null);
+  assert.equal(mod.readDisplayState(paths), null);
+  assert.equal(evals.length, 1);
+});
+
+test('failed display restoration keeps state for a later retry', () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const state = savedDisplayState();
+  mod.writeDisplayState(paths, state);
+
+  assert.equal(mod.restoreDisplay(paths, { hyprctl: () => ({ status: 1, stdout: '' }) }), false);
+  assert.deepEqual(mod.readDisplayState(paths), state);
 });
 
 test('executable lookup respects an explicitly empty PATH', () => {
@@ -614,6 +691,39 @@ test('new launches reject legacy launch policy while status and stop reuse remai
   assert.deepEqual(mod.readState(paths), legacyState);
   assert.equal(await mod.getReusableBrowser(paths, options), null);
   assert.equal(mod.readState(paths), null);
+});
+
+test('sink refresh reuses an active verified controller with an older launch policy', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const legacyState = {
+    pid: process.pid,
+    port: 9222,
+    remoteDebuggingAddress: '127.0.0.1',
+    userDataDir: paths.profileDir,
+    launchMode: 'headless',
+    profileVersion: mod.PROFILE_VERSION,
+    castAudio: false,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    processGroupId: process.pid,
+  };
+  mod.writeState(paths, legacyState);
+  let output = '';
+
+  const code = await mod.commandSinks(
+    paths,
+    {
+      env: { ...process.env, HOME: paths.home },
+      fetchImpl: async () => jsonResponse([cdpPageTarget(9222)]),
+      WebSocketImpl: StopFailingWebSocket,
+      waitMs: 1,
+    },
+    { stdout: { write: (chunk) => { output += chunk; } }, stderr: { write: () => {} } },
+    ['--json'],
+  );
+
+  assert.equal(code, 0);
+  assert.match(output, /Living Room/);
+  assert.deepEqual(mod.readState(paths), legacyState);
 });
 
 test('chromium audio loopback is opt-in', () => {
