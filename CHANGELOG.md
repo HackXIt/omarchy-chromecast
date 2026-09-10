@@ -6,6 +6,11 @@ The release workflow expects a versioned section named `## [X.Y.Z]` for tag `vX.
 
 ## [Unreleased]
 
+### Fixed
+
+- Recognize Chromium's flattened Linux process command line using its private launch identity so discovery and stale/orphan cleanup reliably terminate the isolated controller.
+- Reflect successful start and stop actions immediately in the Quickshell panel and keep Stop available explicitly while backend status catches up.
+
 ## [0.1.3] - 2026-08-23
 
 ### Changed

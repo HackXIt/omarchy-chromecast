@@ -115,7 +115,7 @@ BarWidget {
   function buildActions() {
     var rows = []
     rows.push({ kind: "pick", icon: "󰐊", label: statusActive ? "Change target" : "Start casting", subtitle: sinks.length > 0 ? "Choose from the targets below" : "Scan for available Chromecast targets", enabled: !commandBusy })
-    rows.push({ kind: "stop", icon: "", label: "Stop casting", subtitle: statusActive ? "Stop the active desktop mirror" : "No active cast to stop", enabled: !commandBusy && (statusActive || statusBusy || activeSink !== "") })
+    rows.push({ kind: "stop", icon: "", label: "Stop casting", subtitle: statusActive ? "Stop the active desktop mirror" : "Stop mirroring or close the control session", enabled: !commandBusy })
     rows.push({ kind: "refresh", icon: "󰑐", label: "Refresh targets", subtitle: sinksProc.running ? "Scanning…" : "Update status and available sinks", enabled: !sinksProc.running })
     rows.push({ kind: "doctor", icon: "󰒡", label: "Run doctor", subtitle: "Open diagnostics in a floating terminal", enabled: true })
     rows.push({ kind: "quit", icon: "󰗼", label: "Quit control browser", subtitle: "Close the isolated Chromium controller", enabled: !commandBusy })
@@ -597,6 +597,22 @@ BarWidget {
       var err = String(errorText || "").trim()
       if (exitCode === 0) {
         if (out !== "") root.actionStatus = out
+        var action = actionProc.command.length > 1 ? String(actionProc.command[1]) : ""
+        if (action === "start" && actionProc.command.length > 2) {
+          root.activeSink = root.safeDisplayText(actionProc.command[2], root.maxSinkNameLength)
+          root.statusActive = true
+          root.statusBusy = false
+          root.statusClass = "active"
+          root.statusText = " " + root.neutralizeMarkup(root.activeSink)
+          root.statusTooltip = "Casting to " + root.neutralizeMarkup(root.activeSink)
+        } else if (action === "stop" || action === "quit-browser") {
+          root.activeSink = ""
+          root.statusActive = false
+          root.statusBusy = false
+          root.statusClass = "idle"
+          root.statusText = ""
+          root.statusTooltip = "Chromecast: idle"
+        }
       } else {
         root.targetRefreshError = false
         root.lastError = err !== "" ? err : (out !== "" ? out : "Chromecast action failed")

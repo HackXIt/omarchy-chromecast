@@ -18,6 +18,13 @@ const cdpReadyDelayMs = Number.parseInt(process.env.CHROMIUM_CASTCTL_DUMMY_CDP_R
 const startedAt = Date.now();
 let active = false;
 
+if (process.env.CHROMIUM_CASTCTL_DUMMY_FLATTEN_CMDLINE === '1') {
+  const [executable, script, ...args] = process.argv;
+  const switches = args.filter((arg) => arg.startsWith('--'));
+  const positionals = args.filter((arg) => !arg.startsWith('--'));
+  process.title = [executable, script, ...switches, ...positionals].join(' ');
+}
+
 if (!Number.isInteger(port) || port < 0) {
   process.stderr.write('dummy-chromium-cast: missing --remote-debugging-port\n');
   process.exit(2);
