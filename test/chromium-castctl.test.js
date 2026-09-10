@@ -481,13 +481,10 @@ test('display fit is optional and leaves unsupported monitors unchanged', () => 
   assert.equal(mod.fitDisplayEnabled({ CHROMIUM_CASTCTL_FIT_DISPLAY: 'off' }), false);
 });
 
-test('display fit grace starts when Chromium acknowledges the Cast request', async () => {
+test('Cast request grace starts on acknowledgement without display-fit state', async () => {
   const paths = mod.resolvePaths({ HOME: tempHome() });
   const acknowledgedAt = Date.parse('2026-09-10T12:00:00.000Z');
-  mod.writeDisplayState(paths, {
-    ...savedDisplayState(),
-    createdAt: '2026-09-10T11:59:00.000Z',
-  });
+  mod.writeState(paths, { controller: true });
 
   await mod.startMirroring(
     paths,
@@ -496,10 +493,12 @@ test('display fit grace starts when Chromium acknowledges the Cast request', asy
     { name: 'Living Room' },
   );
 
-  const state = mod.readDisplayState(paths);
-  assert.equal(state.createdAt, '2026-09-10T12:00:00.000Z');
-  assert.equal(mod.displayFitGraceActive(state, acknowledgedAt + mod.DISPLAY_FIT_GRACE_MS), true);
-  assert.equal(mod.displayFitGraceActive(state, acknowledgedAt + mod.DISPLAY_FIT_GRACE_MS + 1), false);
+  const state = mod.readState(paths);
+  assert.equal(state.castRequestStartedAt, '2026-09-10T12:00:00.000Z');
+  assert.equal(state.lastActiveSink, 'Living Room');
+  assert.equal(mod.readDisplayState(paths), null);
+  assert.equal(mod.castRequestGraceActive(state, acknowledgedAt + mod.CAST_REQUEST_GRACE_MS), true);
+  assert.equal(mod.castRequestGraceActive(state, acknowledgedAt + mod.CAST_REQUEST_GRACE_MS + 1), false);
 });
 
 test('a failed Cast start restores a temporarily fitted display', async () => {
@@ -576,6 +575,7 @@ test('status keeps a fitted display during startup grace then cleans up an absen
     castAudio: false,
     processStartTime: mod.readProcessIdentity(process.pid).startTime,
     processGroupId: process.pid,
+    castRequestStartedAt: new Date(graceStartedAt).toISOString(),
   };
   const displayState = { ...savedDisplayState(), createdAt: new Date(graceStartedAt).toISOString() };
   const evals = [];
@@ -601,12 +601,43 @@ test('status keeps a fitted display during startup grace then cleans up an absen
 
   const expired = await mod.getStatus(paths, {
     ...options,
-    now: graceStartedAt + mod.DISPLAY_FIT_GRACE_MS + 1,
+    now: graceStartedAt + mod.CAST_REQUEST_GRACE_MS + 1,
   });
   assert.equal(expired.browser, false);
   assert.equal(mod.readState(paths), null);
   assert.equal(mod.readDisplayState(paths), null);
   assert.equal(evals.length, 1);
+});
+
+test('status expires an unmaterialized Cast request without display-fit state', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const graceStartedAt = Date.parse('2026-09-10T12:00:00.000Z');
+  mod.writeState(paths, {
+    pid: process.pid,
+    port: 9222,
+    remoteDebuggingAddress: '127.0.0.1',
+    userDataDir: paths.profileDir,
+    launchMode: 'headless',
+    profileVersion: mod.PROFILE_VERSION,
+    launchConfigVersion: mod.CHROMIUM_LAUNCH_CONFIG_VERSION,
+    castAudio: false,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    processGroupId: process.pid,
+    castRequestStartedAt: new Date(graceStartedAt).toISOString(),
+  });
+
+  const status = await mod.getStatus(paths, {
+    env: { ...process.env, HOME: paths.home },
+    fetchImpl: async () => jsonResponse([cdpPageTarget(9222)]),
+    WebSocketImpl: EmptySinkWebSocket,
+    waitMs: 1,
+    emptySinkRetryDelayMs: 1,
+    now: graceStartedAt + mod.CAST_REQUEST_GRACE_MS + 1,
+  });
+
+  assert.equal(status.browser, false);
+  assert.equal(mod.readState(paths), null);
+  assert.equal(mod.readDisplayState(paths), null);
 });
 
 test('failed display restoration keeps state for a later retry', () => {
@@ -705,6 +736,7 @@ test('sink refresh reuses an active verified controller with an older launch pol
     castAudio: false,
     processStartTime: mod.readProcessIdentity(process.pid).startTime,
     processGroupId: process.pid,
+    castRequestStartedAt: '2026-09-10T11:00:00.000Z',
   };
   mod.writeState(paths, legacyState);
   let output = '';
@@ -723,7 +755,44 @@ test('sink refresh reuses an active verified controller with an older launch pol
 
   assert.equal(code, 0);
   assert.match(output, /Living Room/);
-  assert.deepEqual(mod.readState(paths), legacyState);
+  assert.deepEqual(mod.readState(paths), { ...legacyState, castRequestStartedAt: null });
+});
+
+test('sink refresh preserves a pending Cast request without display-fit state', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const graceStartedAt = Date.parse('2026-09-10T12:00:00.000Z');
+  const browserState = {
+    pid: process.pid,
+    port: 9222,
+    remoteDebuggingAddress: '127.0.0.1',
+    userDataDir: paths.profileDir,
+    launchMode: 'headless',
+    profileVersion: mod.PROFILE_VERSION,
+    launchConfigVersion: mod.CHROMIUM_LAUNCH_CONFIG_VERSION,
+    castAudio: false,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    processGroupId: process.pid,
+    castRequestStartedAt: new Date(graceStartedAt).toISOString(),
+  };
+  mod.writeState(paths, browserState);
+
+  const code = await mod.commandSinks(
+    paths,
+    {
+      env: { ...process.env, HOME: paths.home },
+      fetchImpl: async () => jsonResponse([cdpPageTarget(9222)]),
+      WebSocketImpl: EmptySinkWebSocket,
+      waitMs: 1,
+      emptySinkRetryDelayMs: 1,
+      now: graceStartedAt + 1000,
+    },
+    { stdout: { write: () => {} }, stderr: { write: () => {} } },
+    ['--json'],
+  );
+
+  assert.equal(code, 0);
+  assert.deepEqual(mod.readState(paths), browserState);
+  assert.equal(mod.readDisplayState(paths), null);
 });
 
 test('chromium audio loopback is opt-in', () => {

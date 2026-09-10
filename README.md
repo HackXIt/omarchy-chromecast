@@ -162,7 +162,7 @@ Lifecycle notes:
 - `waybar-toggle` marks the module busy, signals Waybar, then runs toggle work in the background so the bar can repaint immediately.
 - `stop` attempts to stop every active cast and proceeds with closing the isolated Chromium control browser even when a Cast stop request fails.
 - Immediately before starting desktop mirroring, the helper saves the focused Hyprland display's mode, position, scale, and transform in private state and temporarily selects its closest supported 16:9 mode, preferring 1920x1080. Stop, quit, start failure, and stale-controller cleanup restore the saved configuration. Displays without a suitable mode and non-Hyprland sessions continue without adjustment.
-- After Chromium acknowledges the Cast start request, an empty session list is allowed a 30-second grace period for portal selection and receiver startup. Once that grace period expires, the next status check closes the controller and restores the saved mode, position, scale, and transform. Failed restoration keeps the private display state for a later retry.
+- After Chromium acknowledges the Cast start request, controller state records a 30-second grace period for portal selection and receiver startup. This applies independently of display fitting, including `--no-fit-display`, already-16:9 displays, non-Hyprland sessions, and displays without a supported mode. Once the grace period expires without an active session, the next status check closes the controller and restores mode, position, scale, and transform if display state was saved. Failed restoration keeps the private display state for a later retry.
 
 ## First-run portal prompt
 
