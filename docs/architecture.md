@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | `commands.js` | CLI parsing, command dispatch, state-lock scope, background helper spawning | Decides which commands may mutate local controller state |
 | `state.js` / `paths.js` / `fs-private.js` | Private XDG paths, atomic state writes, busy UI state, operation lock | Local state ownership, symlink/non-directory refusal, lock ownership |
+| `display.js` | Focused Hyprland monitor inspection, temporary 16:9 mode selection, exact configuration restoration | Validated compositor data and private restore state before runtime display changes |
 | `process-identity.js` / `chromium-processes.js` | `/proc` identity reads, launch identity records, verified process matching | Process ownership before reuse or signaling |
 | `chromium.js` | Isolated profile lifecycle, Chromium startup/reuse/cleanup, DevTools readiness | Private profile, loopback DevTools address, failure cleanup |
 | `cdp.js` | Bounded CDP HTTP/WebSocket client, page target lookup, CDP URL validation | CDP access is loopback-only and size-limited |
@@ -32,6 +33,7 @@ flowchart TD
   CDP --> BACKEND[Chromium Cast backend]
   BACKEND --> PORTAL[Wayland/Hyprland portal + PipeWire]
   CMD --> STATE[state.json / ui-state.json]
+  CMD --> DISPLAY[display.js temporary 16:9 mode]
   STATE --> FORMAT[format.js status JSON/text]
   FORMAT --> UI
 ```
@@ -49,7 +51,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   Need[command needs Chromium?] --> Reuse[getReusableBrowser]
-  Reuse --> VerifyState{state matches profile version, audio mode, private profile?}
+  Reuse --> VerifyState{required launch policy, profile version, audio mode, and private profile match?}
   VerifyState -- no --> Discard[discard state browser + cleanup profile processes]
   VerifyState -- yes --> VerifyProc{pid/start time/profile/process group verified?}
   VerifyProc -- no --> Discard
@@ -66,7 +68,7 @@ flowchart TD
   Minimize --> Running[write state.json]
 ```
 
-`chromium.js` launches a headless controller with `--user-data-dir=<private profile>`, `--remote-debugging-address=127.0.0.1`, and `--remote-debugging-port=0`. `chromium-processes.js` records both the configured executable and observed browser executable/device/inode during startup so later cleanup can distinguish the helper's controller from unrelated processes spoofing a profile argument.
+`chromium.js` launches a headless controller with `--user-data-dir=<private profile>`, `--remote-debugging-address=127.0.0.1`, `--remote-debugging-port=0`, and a 1920x1080 virtual screen/window so Chromium does not clamp Cast capture to its 800x450 headless default. The browser receives a private `XDG_CONFIG_HOME`, and standard Chromium user-flag environment variables are removed before launch, isolating normal per-user flags and extensions without claiming to override system policy or arbitrary custom wrappers. A separate launch-configuration version prevents new casts from reusing an older launch policy; status and stop operations may still attach to that verified older controller so an upgrade-time status poll does not terminate an active cast. `chromium-processes.js` records both the configured executable and observed browser executable/device/inode during startup so later cleanup can distinguish the helper's controller from unrelated processes spoofing a profile argument.
 
 ## CDP connection and Cast operations
 
@@ -74,6 +76,7 @@ flowchart TD
 - HTTP responses and WebSocket messages are bounded so hostile or broken CDP responses fail deterministically.
 - `cast.js` is the only module sending `Cast.enable`, `Cast.startDesktopMirroring`, or `Cast.stopCasting`.
 - `start` updates `lastActiveSink` only after Chromium accepts `Cast.startDesktopMirroring`. The Wayland portal prompt is still owned by Chromium/xdg-desktop-portal-hyprland and is not bypassed.
+- Immediately before the Cast start request, `display.js` may persist the focused monitor's mode, position, scale, and transform, then use Hyprland's Lua `hl.monitor` runtime API to select the closest supported 16:9 mode, preferring 1920x1080. Unsupported displays and non-Hyprland sessions are left unchanged.
 - `stop` tries every active sink, clears local active state, then closes the isolated Chromium controller even if one stop request fails.
 
 ## State, locks, and failure cleanup
@@ -93,6 +96,8 @@ flowchart TD
 ```
 
 State files are private to the user under XDG data/state/cache roots. Atomic writes go through `fs-private.js`, directories are created with private permissions, and unsafe non-directory/symlink paths are refused where the helper creates private directories. Locks with a verified owner are stale only when that process is gone or no longer has the recorded start time; incomplete or invalid lock records are reclaimed only after the stale timeout.
+
+Display restore state is written before the temporary mode is applied. Browser shutdown, failed Cast start, explicit quit, and idle/stale status cleanup all attempt idempotent restoration; the state file remains available for a later retry if Hyprland cannot apply the saved configuration.
 
 Security-relevant parse and lifecycle errors use explicit error classes/codes from `errors.js` rather than message-text matching. For example, an oversized `DevToolsActivePort` file is classified as `cdp_devtools_active_port_too_large`, and wait logic branches on that sentinel code.
 

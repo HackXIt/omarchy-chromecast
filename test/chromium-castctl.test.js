@@ -373,6 +373,7 @@ test('XDG paths use isolated chromium-castctl locations and ignore relative XDG 
   const home = tempHome();
   const paths = mod.resolvePaths({ HOME: home, XDG_DATA_HOME: 'relative-data', XDG_STATE_HOME: 'relative-state', XDG_CACHE_HOME: 'relative-cache' });
   assert.equal(paths.profileDir, path.join(home, '.local', 'share', 'chromium-castctl', 'chromium-profile'));
+  assert.equal(paths.launcherConfigDir, path.join(home, '.local', 'share', 'chromium-castctl', 'chromium-config'));
   assert.equal(paths.stateFile, path.join(home, '.local', 'state', 'chromium-castctl', 'state.json'));
   assert.equal(paths.logFile, path.join(home, '.cache', 'chromium-castctl', 'chromium.log'));
 });
@@ -384,6 +385,160 @@ test('state read/write round-trips JSON state with private file permissions', ()
   assert.deepEqual(mod.readState(paths), state);
   assert.equal(fs.statSync(paths.stateFile).mode & 0o777, 0o600);
   assert.equal(fs.statSync(path.dirname(paths.stateFile)).mode & 0o777, 0o700);
+});
+
+function focusedThreeTwoMonitor(overrides = {}) {
+  return {
+    name: 'eDP-1',
+    width: 2256,
+    height: 1504,
+    refreshRate: 59.999,
+    x: 0,
+    y: 0,
+    scale: 1.5666667,
+    transform: 0,
+    focused: true,
+    disabled: false,
+    availableModes: [
+      '2256x1504@60.00Hz',
+      '2560x1440@60.00Hz',
+      '1920x1080@60.00Hz',
+      '1280x720@60.00Hz',
+    ],
+    ...overrides,
+  };
+}
+
+function savedDisplayState() {
+  return {
+    version: mod.DISPLAY_STATE_VERSION,
+    output: 'eDP-1',
+    mode: '2256x1504@60.00',
+    position: '0x0',
+    scale: 1.5666667,
+    transform: 0,
+    temporaryMode: '1920x1080@60.00',
+    createdAt: new Date().toISOString(),
+  };
+}
+
+test('16:9 mode selection prefers 1080p and accepts common near-16:9 modes', () => {
+  assert.deepEqual(mod.selectSixteenNineMode([
+    '3840x2160@60.00Hz',
+    '1366x768@60.00Hz',
+    '1920x1080@59.94Hz',
+    'not-a-mode',
+  ]), {
+    width: 1920,
+    height: 1080,
+    refreshRate: 59.94,
+    value: '1920x1080@59.94',
+  });
+  assert.equal(mod.isSixteenNine(mod.parseMode('1366x768@60.00Hz')), true);
+  assert.equal(mod.isSixteenNine(mod.parseMode('1920x1200@60.00Hz')), false);
+});
+
+test('display fit saves the focused monitor and restores its exact configuration', () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const calls = [];
+  const hyprctl = (args) => {
+    calls.push(args);
+    if (args[0] === 'monitors') return { status: 0, stdout: JSON.stringify([focusedThreeTwoMonitor()]) };
+    return { status: 0, stdout: '' };
+  };
+
+  assert.equal(mod.prepareDisplayForCast(paths, { hyprctl }), true);
+  const state = mod.readDisplayState(paths);
+  assert.deepEqual(state, {
+    version: mod.DISPLAY_STATE_VERSION,
+    output: 'eDP-1',
+    mode: '2256x1504@60.00',
+    position: '0x0',
+    scale: 1.5666667,
+    transform: 0,
+    temporaryMode: '1920x1080@60.00',
+    createdAt: state.createdAt,
+  });
+  assert.match(calls[1][1], /mode = "1920x1080@60\.00"/);
+  assert.equal(mod.restoreDisplay(paths, { hyprctl }), true);
+  assert.match(calls[2][1], /mode = "2256x1504@60\.00"/);
+  assert.equal(mod.readDisplayState(paths), null);
+});
+
+test('display fit is optional and leaves unsupported monitors unchanged', () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  let calls = 0;
+  const hyprctl = () => {
+    calls += 1;
+    return { status: 0, stdout: JSON.stringify([focusedThreeTwoMonitor({ availableModes: ['2256x1504@60.00Hz'] })]) };
+  };
+
+  assert.equal(mod.prepareDisplayForCast(paths, { hyprctl, fitDisplay: false }), false);
+  assert.equal(calls, 0);
+  assert.equal(mod.prepareDisplayForCast(paths, { hyprctl }), false);
+  assert.equal(calls, 1);
+  assert.equal(mod.readDisplayState(paths), null);
+  assert.equal(mod.fitDisplayEnabled({ CHROMIUM_CASTCTL_FIT_DISPLAY: 'off' }), false);
+});
+
+test('a failed Cast start restores a temporarily fitted display', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const calls = [];
+  const hyprctl = (args) => {
+    calls.push(args);
+    if (args[0] === 'monitors') return { status: 0, stdout: JSON.stringify([focusedThreeTwoMonitor()]) };
+    return { status: 0, stdout: '' };
+  };
+  const client = { send: async () => { throw new Error('receiver refused start'); } };
+
+  await assert.rejects(
+    () => mod.startMirroring(paths, { hyprctl }, client, { name: 'Living Room' }),
+    /receiver refused start/,
+  );
+  assert.equal(calls.filter((args) => args[0] === 'eval').length, 2);
+  assert.equal(mod.readDisplayState(paths), null);
+});
+
+test('stop and quit restore saved display state even without a running controller', async () => {
+  for (const command of ['stop', 'quit-browser']) {
+    const paths = mod.resolvePaths({ HOME: tempHome() });
+    const evals = [];
+    const hyprctl = (args) => {
+      if (args[0] === 'eval') evals.push(args[1]);
+      return { status: 0, stdout: '' };
+    };
+    mod.writeDisplayState(paths, savedDisplayState());
+
+    const code = await mod.run(
+      [command],
+      { stdout: { write: () => {} }, stderr: { write: () => {} } },
+      { HOME: paths.home, PATH: '' },
+      { paths, hyprctl },
+    );
+
+    assert.equal(code, 0, command);
+    assert.equal(evals.length, 1, command);
+    assert.match(evals[0], /mode = "2256x1504@60\.00"/);
+    assert.equal(mod.readDisplayState(paths), null, command);
+  }
+});
+
+test('idle status restores display state left by an interrupted controller', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const evals = [];
+  mod.writeDisplayState(paths, savedDisplayState());
+
+  const status = await mod.getStatus(paths, {
+    env: { HOME: paths.home, PATH: '' },
+    hyprctl: (args) => {
+      if (args[0] === 'eval') evals.push(args[1]);
+      return { status: 0, stdout: '' };
+    },
+  });
+
+  assert.equal(status.browser, false);
+  assert.equal(evals.length, 1);
+  assert.equal(mod.readDisplayState(paths), null);
 });
 
 test('executable lookup respects an explicitly empty PATH', () => {
@@ -402,9 +557,63 @@ test('chromium launch args use an isolated headless profile and localhost-only D
   assert.ok(args.includes('--remote-debugging-address=127.0.0.1'));
   assert.ok(args.includes('--remote-debugging-port=9333'));
   assert.ok(args.includes('--headless=new'));
+  assert.ok(args.includes('--screen-info={1920x1080}'));
+  assert.ok(args.includes('--window-size=1920,1080'));
   assert.ok(args.includes('--enable-features=MediaRouter'));
   assert.ok(!args.some((arg) => arg.includes('PulseaudioLoopbackForCast')));
   assert.ok(!args.some((arg) => arg.includes('.config/chromium')));
+});
+
+test('chromium launch isolates distribution launcher flags from the normal browser', () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const env = mod.chromiumLaunchEnv(paths, {
+    HOME: paths.home,
+    XDG_CONFIG_HOME: '/normal/config',
+    CHROME_EXTRA_FLAGS: '--load-extension=/tmp/user-extension',
+    CHROME_EXTRA_FLAGS_BETA: '--window-size=800,600',
+    'CHROME_EXTRA_FLAGS_ARCH LINUX': '--remote-debugging-address=0.0.0.0',
+    CHROME_USER_FLAGS: '--disable-features=MediaRouter',
+    CHROMIUM_USER_FLAGS: '--user-data-dir=/tmp/user-profile',
+    CHROMIUM_FLAGS: '--disable-gpu',
+    CHROME_VERSION_EXTRA: 'Arch Linux',
+    KEEP_ME: 'yes',
+  });
+
+  assert.equal(env.XDG_CONFIG_HOME, paths.launcherConfigDir);
+  assert.equal(env.CHROME_EXTRA_FLAGS, undefined);
+  assert.equal(env.CHROME_EXTRA_FLAGS_BETA, undefined);
+  assert.equal(env['CHROME_EXTRA_FLAGS_ARCH LINUX'], undefined);
+  assert.equal(env.CHROME_USER_FLAGS, undefined);
+  assert.equal(env.CHROMIUM_USER_FLAGS, undefined);
+  assert.equal(env.CHROMIUM_FLAGS, undefined);
+  assert.equal(env.CHROME_VERSION_EXTRA, 'Arch Linux');
+  assert.equal(env.KEEP_ME, 'yes');
+});
+
+test('new launches reject legacy launch policy while status and stop reuse remain available', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const legacyState = {
+    pid: process.pid,
+    port: 9222,
+    remoteDebuggingAddress: '127.0.0.1',
+    userDataDir: paths.profileDir,
+    launchMode: 'headless',
+    profileVersion: mod.PROFILE_VERSION,
+    castAudio: false,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    processGroupId: process.pid,
+  };
+  const options = {
+    env: { ...process.env, HOME: paths.home },
+    fetchImpl: async () => jsonResponse([cdpPageTarget(9222)]),
+  };
+  mod.writeState(paths, legacyState);
+
+  assert.equal(mod.stateMatchesLaunchConfig(legacyState, paths, options.env), false);
+  assert.deepEqual(await mod.getReusableBrowser(paths, { ...options, requireLaunchConfig: false }), legacyState);
+  assert.deepEqual(mod.readState(paths), legacyState);
+  assert.equal(await mod.getReusableBrowser(paths, options), null);
+  assert.equal(mod.readState(paths), null);
 });
 
 test('chromium audio loopback is opt-in', () => {
@@ -480,6 +689,7 @@ test('status cleanup clears unverified stale same-profile browser state without 
       userDataDir: paths.profileDir,
       launchMode: 'headless',
       profileVersion: 4,
+      launchConfigVersion: mod.CHROMIUM_LAUNCH_CONFIG_VERSION,
       castAudio: false,
       processStartTime: 'definitely-not-the-live-process-start-time',
       processGroupId: child.pid,
@@ -787,6 +997,7 @@ test('CLI formats async command errors without a stack trace', async () => {
     userDataDir: paths.profileDir,
     launchMode: 'headless',
     profileVersion: 4,
+    launchConfigVersion: mod.CHROMIUM_LAUNCH_CONFIG_VERSION,
     castAudio: false,
     processStartTime: mod.readProcessIdentity(process.pid).startTime,
     processGroupId: process.pid,
@@ -917,6 +1128,7 @@ test('sinks --json returns structured safe records and rejects record-boundary c
     userDataDir: paths.profileDir,
     launchMode: 'headless',
     profileVersion: 4,
+    launchConfigVersion: mod.CHROMIUM_LAUNCH_CONFIG_VERSION,
     castAudio: false,
     processStartTime: mod.readProcessIdentity(process.pid).startTime,
     processGroupId: process.pid,
@@ -958,6 +1170,7 @@ test('stop tries every active sink and clears local controller state after stop 
     userDataDir: paths.profileDir,
     launchMode: 'headless',
     profileVersion: 4,
+    launchConfigVersion: mod.CHROMIUM_LAUNCH_CONFIG_VERSION,
     castAudio: false,
     processStartTime: mod.readProcessIdentity(process.pid).startTime,
     processGroupId: process.pid,
@@ -995,6 +1208,7 @@ test('stop clears local controller state when CDP target setup fails', async () 
     userDataDir: paths.profileDir,
     launchMode: 'headless',
     profileVersion: 4,
+    launchConfigVersion: mod.CHROMIUM_LAUNCH_CONFIG_VERSION,
     castAudio: false,
     processStartTime: mod.readProcessIdentity(process.pid).startTime,
     processGroupId: process.pid,
@@ -1093,6 +1307,7 @@ test('status does not inspect or clean state owned by another locked command', a
     userDataDir: paths.profileDir,
     launchMode: 'headless',
     profileVersion: 4,
+    launchConfigVersion: mod.CHROMIUM_LAUNCH_CONFIG_VERSION,
     castAudio: false,
     processStartTime: mod.readProcessIdentity(process.pid).startTime,
     processGroupId: process.pid,
@@ -1123,7 +1338,6 @@ test('status does not inspect or clean state owned by another locked command', a
   assert.deepEqual(mod.readState(paths), state);
 });
 
-
 test('sinks --json marks duplicate friendly names as ambiguous and not startable', async () => {
   const paths = mod.resolvePaths({ HOME: tempHome() });
   mod.writeState(paths, {
@@ -1133,6 +1347,7 @@ test('sinks --json marks duplicate friendly names as ambiguous and not startable
     userDataDir: paths.profileDir,
     launchMode: 'headless',
     profileVersion: 4,
+    launchConfigVersion: mod.CHROMIUM_LAUNCH_CONFIG_VERSION,
     castAudio: false,
     processStartTime: mod.readProcessIdentity(process.pid).startTime,
     processGroupId: process.pid,

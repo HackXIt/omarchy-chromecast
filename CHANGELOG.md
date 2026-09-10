@@ -6,6 +6,11 @@ The release workflow expects a versioned section named `## [X.Y.Z]` for tag `vX.
 
 ## [Unreleased]
 
+### Fixed
+
+- Raised headless desktop mirroring's capture ceiling from Chromium's 800x450 default to 1920x1080 and isolated controller launches from standard per-user browser flag files and environment variables.
+- Temporarily fit the focused Hyprland display to its closest supported 16:9 mode for fullscreen television casting, then restore its exact prior configuration on stop, failure, quit, or stale cleanup.
+
 ## [0.1.3] - 2026-08-23
 
 ### Changed

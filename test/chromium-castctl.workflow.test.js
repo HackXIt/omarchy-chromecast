@@ -86,6 +86,9 @@ test('dummy Cast backend exercises plugin helper workflow commands', () => {
     assert.match(start.stdout, /Started desktop mirroring to Dummy Living Room/);
     const activeState = mod.readState(paths);
     assert.ok(activeState && mod.isPidAlive(activeState.pid), 'start leaves the dummy control browser running');
+    assert.equal(activeState.launchConfigVersion, mod.CHROMIUM_LAUNCH_CONFIG_VERSION);
+    assert.ok(activeState.launchArgs.includes('--screen-info={1920x1080}'));
+    assert.ok(activeState.launchArgs.includes('--window-size=1920,1080'));
 
     const activeStatus = runCastctl(['status', '--waybar'], env);
     assert.equal(activeStatus.status, 0, activeStatus.stderr);

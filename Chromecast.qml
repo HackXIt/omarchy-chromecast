@@ -51,6 +51,7 @@ BarWidget {
   readonly property int maxSinkNameLength: 160
   readonly property int maxHelperTextLength: 65536
   readonly property bool alwaysVisible: setting("alwaysVisible", false) === true
+  readonly property bool fitDisplay: setting("fitDisplay", true) !== false
   readonly property bool commandBusy: actionProc.running || sinksProc.running
   readonly property bool busy: statusBusy || commandBusy
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -270,7 +271,9 @@ BarWidget {
       actionStatus = "Cannot start " + String(record.displayName || record.name) + "; duplicate receiver names are ambiguous."
       return
     }
-    runCastctl(["start", String(record.name)], "Starting cast to " + String(record.displayName || record.name) + "…", true)
+    var args = ["start", String(record.name)]
+    if (!fitDisplay) args.push("--no-fit-display")
+    runCastctl(args, "Starting cast to " + String(record.displayName || record.name) + "…", true)
   }
   function toggleCast() { statusActive ? stopCasting() : pickTarget() }
 
