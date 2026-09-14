@@ -282,6 +282,8 @@ Audio must be validated empirically by starting a cast and playing system audio.
 
 ## Development
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution scope, testing expectations, safety boundaries, and pull request evidence.
+
 Run tests with Node's built-in test runner and validate the plugin manifest:
 
 ```bash
