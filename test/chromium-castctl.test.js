@@ -395,6 +395,23 @@ test('executable lookup falls back to the process PATH when PATH is absent', () 
   assert.ok(mod.findExecutable('node', {}));
 });
 
+test('process argument matching supports Chromium flattened command lines', () => {
+  const paths = { profileDir: '/tmp/cast profile' };
+  const identity = {
+    cmdline: `/usr/lib/chromium/chromium --headless=new --user-data-dir=${paths.profileDir} --type=renderer\0`,
+  };
+
+  assert.equal(mod.processUsesProfile(identity, paths), true);
+  assert.equal(mod.cmdlineHasArgument(identity, '--headless=new'), true);
+  assert.equal(mod.cmdlineHasArgumentPrefix(identity, '--type='), true);
+  assert.equal(mod.processUsesProfile(identity, { profileDir: '/tmp/cast' }), false);
+  assert.equal(mod.processUsesProfile(identity, { profileDir: '/tmp/cast-profile' }), false);
+  assert.equal(mod.cmdlineHasLaunchToken({
+    cmdline: '/usr/lib/chromium/chromium --chromium-castctl-launch-token=token-123 about:blank\0',
+  }, 'token-123'), true);
+  assert.equal(mod.cmdlineHasLaunchToken(identity, 'token with spaces'), false);
+});
+
 test('chromium launch args use an isolated headless profile and localhost-only DevTools', () => {
   const paths = mod.resolvePaths({ HOME: tempHome() });
   const args = mod.chromiumLaunchArgs(paths, 9333, {});
@@ -565,6 +582,101 @@ test('orphan cleanup does not signal another executable spoofing the profile arg
     assert.equal(status.browser, false);
     assert.equal(await waitForChildExit(child, 300), false);
     assert.equal(mod.isPidAlive(child.pid), true);
+  } finally {
+    if (mod.isPidAlive(child.pid)) {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        process.kill(child.pid, 'SIGKILL');
+      }
+    }
+  }
+});
+
+test('orphan cleanup does not trust an unrecorded flattened browser command line', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const title = `${process.execPath} --user-data-dir=${paths.profileDir} --remote-debugging-address=127.0.0.1`;
+  const child = childProcess.spawn(process.execPath, [
+    '-e',
+    `process.title = ${JSON.stringify(title)}; setInterval(() => {}, 1000)`,
+  ], {
+    detached: true,
+    stdio: 'ignore',
+  });
+
+  try {
+    const deadline = Date.now() + 1000;
+    let args = [];
+    while (Date.now() < deadline) {
+      args = mod.cmdlineArgs(mod.readProcessIdentity(child.pid));
+      if (args.length === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(args.length, 1);
+
+    const status = await mod.getStatus(paths, {
+      env: { ...process.env, CHROMIUM_CASTCTL_CHROMIUM: process.execPath },
+      timeoutMs: 1,
+      waitMs: 1,
+    });
+
+    assert.equal(status.browser, false);
+    assert.equal(await waitForChildExit(child, 300), false);
+    assert.equal(mod.isPidAlive(child.pid), true);
+  } finally {
+    if (mod.isPidAlive(child.pid)) {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        process.kill(child.pid, 'SIGKILL');
+      }
+    }
+  }
+});
+
+test('recorded launch token bridges a flattened wrapper executable transition', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const launchToken = 'recorded-token-123';
+  const title = `${process.execPath} --user-data-dir=${paths.profileDir} --chromium-castctl-launch-token=${launchToken} about:blank`;
+  const child = childProcess.spawn(process.execPath, [
+    '-e',
+    `process.title = ${JSON.stringify(title)}; setInterval(() => {}, 1000)`,
+  ], {
+    detached: true,
+    stdio: 'ignore',
+  });
+
+  try {
+    const deadline = Date.now() + 1000;
+    let identity;
+    while (Date.now() < deadline) {
+      identity = mod.readProcessIdentity(child.pid);
+      if (mod.cmdlineArgs(identity).length === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(mod.cmdlineArgs(identity).length, 1);
+
+    const staleExecutable = fs.statSync('/bin/sleep', { bigint: true });
+    mod.writeBrowserIdentity(paths, {
+      configuredExecutable: fs.realpathSync(process.execPath),
+      browserExecutable: fs.realpathSync('/bin/sleep'),
+      browserDevice: String(staleExecutable.dev),
+      browserInode: String(staleExecutable.ino),
+      pid: child.pid,
+      processStartTime: identity.startTime,
+      launchToken,
+      argumentsVerified: true,
+    });
+
+    const status = await mod.getStatus(paths, {
+      env: { ...process.env, CHROMIUM_CASTCTL_CHROMIUM: process.execPath },
+      timeoutMs: 1,
+      waitMs: 1,
+    });
+
+    assert.equal(status.browser, false);
+    assert.equal(await waitForChildExit(child), true);
+    assert.equal(mod.isPidAlive(child.pid), false);
   } finally {
     if (mod.isPidAlive(child.pid)) {
       try {

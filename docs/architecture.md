@@ -66,7 +66,7 @@ flowchart TD
   Minimize --> Running[write state.json]
 ```
 
-`chromium.js` launches a headless controller with `--user-data-dir=<private profile>`, `--remote-debugging-address=127.0.0.1`, and `--remote-debugging-port=0`. `chromium-processes.js` records both the configured executable and observed browser executable/device/inode during startup so later cleanup can distinguish the helper's controller from unrelated processes spoofing a profile argument.
+`chromium.js` launches a headless controller with `--user-data-dir=<private profile>`, `--remote-debugging-address=127.0.0.1`, and `--remote-debugging-port=0`. `chromium-processes.js` records and refreshes both the configured executable and observed browser executable/device/inode during startup so later cleanup can distinguish the helper's controller from unrelated processes spoofing a profile argument. Flattened `/proc/<pid>/cmdline` cleanup additionally requires the private launch record because its original argv boundaries cannot be reconstructed safely.
 
 ## CDP connection and Cast operations
 
