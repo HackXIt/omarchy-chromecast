@@ -1,3 +1,5 @@
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for testing, manual validation, and pull request evidence expectations.
+
 ## Summary
 
 - 

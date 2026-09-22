@@ -12,6 +12,8 @@ The release workflow expects a versioned section named `## [X.Y.Z]` for tag `vX.
 - Temporarily fit the focused Hyprland display to its closest supported 16:9 mode for fullscreen television casting, then restore its prior mode, position, scale, and transform on stop, failure, quit, stale cleanup, or a Cast session failing to appear after startup.
 - Track acknowledged Cast startup independently of display fitting so canceled portal requests close their controller after a short grace period on all displays and sessions.
 - Reuse verified controllers with an older launch policy for receiver refreshes so opening the casting popup after an upgrade does not interrupt an active cast.
+- Recognize Chromium's flattened Linux process command line using its private launch identity so discovery and stale/orphan cleanup reliably terminate the isolated controller.
+- Reflect successful start and stop actions immediately in the Quickshell panel and keep Stop available explicitly while backend status catches up.
 
 ## [0.1.3] - 2026-08-23
 

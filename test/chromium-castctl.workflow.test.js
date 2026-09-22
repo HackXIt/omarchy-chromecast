@@ -122,6 +122,62 @@ test('dummy Cast backend exercises plugin helper workflow commands', () => {
   }
 });
 
+test('discovery closes Chromium after it flattens its process command line', () => {
+  const home = tempHome();
+  const env = { ...makeEnv(home), CHROMIUM_CASTCTL_DUMMY_FLATTEN_CMDLINE: '1' };
+  const paths = mod.resolvePaths(env);
+  let browserPid;
+
+  try {
+    const sinks = runCastctl(['sinks'], env);
+    assert.equal(sinks.status, 0, sinks.stderr);
+    assert.equal(sinks.stdout.trim(), 'Dummy Living Room');
+
+    browserPid = mod.readBrowserIdentity(paths)?.pid;
+    assert.ok(browserPid);
+    assert.equal(mod.isPidAlive(browserPid), false);
+    assert.equal(mod.readState(paths), null);
+  } finally {
+    if (browserPid && mod.isPidAlive(browserPid)) {
+      try {
+        process.kill(-browserPid, 'SIGKILL');
+      } catch {
+        process.kill(browserPid, 'SIGKILL');
+      }
+    }
+  }
+});
+
+test('status cleans a recorded flattened browser after controller state is lost', () => {
+  const home = tempHome();
+  const env = { ...makeEnv(home), CHROMIUM_CASTCTL_DUMMY_FLATTEN_CMDLINE: '1' };
+  const paths = mod.resolvePaths(env);
+  let browserPid;
+
+  try {
+    const start = runCastctl(['start', 'Dummy Living Room'], env);
+    assert.equal(start.status, 0, start.stderr);
+    const state = mod.readState(paths);
+    assert.ok(state && mod.isPidAlive(state.pid));
+    browserPid = state.pid;
+    fs.rmSync(paths.stateFile);
+
+    const status = runCastctl(['status', '--waybar'], env);
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(JSON.parse(status.stdout).class, 'idle');
+    assert.equal(mod.isPidAlive(browserPid), false);
+    assert.equal(mod.readState(paths), null);
+  } finally {
+    if (browserPid && mod.isPidAlive(browserPid)) {
+      try {
+        process.kill(-browserPid, 'SIGKILL');
+      } catch {
+        process.kill(browserPid, 'SIGKILL');
+      }
+    }
+  }
+});
+
 test('status cleans a wrapped orphan after its browser executable is replaced', () => {
   const home = tempHome();
   const browserExecutable = path.join(home, 'bin', 'dummy-node');
