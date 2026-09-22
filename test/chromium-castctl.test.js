@@ -465,6 +465,26 @@ test('display fit restores the focused monitor mode, position, scale, and transf
   assert.equal(mod.readDisplayState(paths), null);
 });
 
+test('ambiguous display fit failure attempts restoration and keeps state when restoration fails', () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const evals = [];
+  const hyprctl = (args) => {
+    if (args[0] === 'monitors') return { status: 0, stdout: JSON.stringify([focusedThreeTwoMonitor()]) };
+    evals.push(args[1]);
+    if (evals.length === 1) return { status: null, stdout: '', error: new Error('timed out') };
+    return { status: 1, stdout: '' };
+  };
+
+  assert.equal(mod.prepareDisplayForCast(paths, { hyprctl }), false);
+  assert.equal(evals.length, 2);
+  assert.match(evals[0], /mode = "1920x1080@60\.00"/);
+  assert.match(evals[1], /mode = "2256x1504@60\.00"/);
+  assert.deepEqual(mod.readDisplayState(paths), {
+    ...savedDisplayState(),
+    createdAt: mod.readDisplayState(paths).createdAt,
+  });
+});
+
 test('display fit is optional and leaves unsupported monitors unchanged', () => {
   const paths = mod.resolvePaths({ HOME: tempHome() });
   let calls = 0;
@@ -604,6 +624,52 @@ test('status keeps a fitted display during startup grace then cleans up an absen
     now: graceStartedAt + mod.CAST_REQUEST_GRACE_MS + 1,
   });
   assert.equal(expired.browser, false);
+  assert.equal(mod.readState(paths), null);
+  assert.equal(mod.readDisplayState(paths), null);
+  assert.equal(evals.length, 1);
+});
+
+test('status closes the controller and restores the display when an observed Cast session disappears', async () => {
+  const paths = mod.resolvePaths({ HOME: tempHome() });
+  const browserState = {
+    pid: process.pid,
+    port: 9222,
+    remoteDebuggingAddress: '127.0.0.1',
+    userDataDir: paths.profileDir,
+    launchMode: 'headless',
+    profileVersion: mod.PROFILE_VERSION,
+    launchConfigVersion: mod.CHROMIUM_LAUNCH_CONFIG_VERSION,
+    castAudio: false,
+    processStartTime: mod.readProcessIdentity(process.pid).startTime,
+    processGroupId: process.pid,
+    castRequestStartedAt: '2026-09-10T12:00:00.000Z',
+  };
+  const evals = [];
+  const displayState = savedDisplayState();
+  const options = {
+    env: { ...process.env, HOME: paths.home },
+    fetchImpl: async () => jsonResponse([cdpPageTarget(9222)]),
+    waitMs: 1,
+    emptySinkRetryDelayMs: 1,
+    hyprctl: (args) => {
+      if (args[0] === 'eval') evals.push(args[1]);
+      return { status: 0, stdout: '' };
+    },
+  };
+  mod.writeState(paths, browserState);
+  mod.writeDisplayState(paths, displayState);
+
+  const active = await mod.getStatus(paths, { ...options, WebSocketImpl: StopFailingWebSocket });
+  assert.equal(active.activeSink, 'Living Room');
+  assert.deepEqual(mod.readState(paths), {
+    ...browserState,
+    castRequestStartedAt: null,
+    castSessionObserved: true,
+  });
+  assert.deepEqual(mod.readDisplayState(paths), displayState);
+
+  const idle = await mod.getStatus(paths, { ...options, WebSocketImpl: EmptySinkWebSocket });
+  assert.equal(idle.browser, false);
   assert.equal(mod.readState(paths), null);
   assert.equal(mod.readDisplayState(paths), null);
   assert.equal(evals.length, 1);
@@ -772,7 +838,11 @@ test('sink refresh reuses an active verified controller with an older launch pol
 
   assert.equal(code, 0);
   assert.match(output, /Living Room/);
-  assert.deepEqual(mod.readState(paths), { ...legacyState, castRequestStartedAt: null });
+  assert.deepEqual(mod.readState(paths), {
+    ...legacyState,
+    castRequestStartedAt: null,
+    castSessionObserved: true,
+  });
 });
 
 test('sink refresh preserves a pending Cast request without display-fit state', async () => {
